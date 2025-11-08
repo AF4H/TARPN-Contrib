@@ -1,0 +1,9 @@
+#!ipxe
+
+dhcp
+
+# Change this to your real GitHub org/repo/branch
+set remote_script https://raw.githubusercontent.com/AF4H/TARPN-Contrib/main/rpi-oem/provision/ipxe-runtime.ipxe
+
+echo Bootstrapping from ${remote_script} ...
+chain ${remote_script} || echo Failed to chain to ${remote_script}

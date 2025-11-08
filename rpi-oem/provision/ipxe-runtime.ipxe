@@ -1,0 +1,20 @@
+#!ipxe
+
+# --- basic network ---
+dhcp
+
+# --- Debian installer parameters ---
+set suite trixie
+set arch amd64
+set mirror http://deb.debian.org/debian
+
+# preseed file hosted in your repo (adjust org/repo/branch)
+set preseed_url https://raw.githubusercontent.com/AF4H/TARPN-Contrib/main/rpi-oem/provision/preseed.cfg
+
+# Debian netboot kernel/initrd paths
+set kpath ${mirror}/dists/${suite}/main/installer-${arch}/current/images/netboot/debian-installer/${arch}
+
+echo Booting Debian ${suite} automated install...
+kernel ${kpath}/linux auto=true priority=critical url=${preseed_url} DEBIAN_FRONTEND=text
+initrd ${kpath}/initrd.gz
+boot
