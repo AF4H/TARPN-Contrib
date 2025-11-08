@@ -124,7 +124,6 @@ if [ -z "${PRIMARY_IF:-}" ] || [ ! -e "/sys/class/net/${PRIMARY_IF}/address" ]; 
   echo "[factory-bootstrap] WARNING: Could not determine primary interface; leaving hostname unchanged."
 else
   MAC=$(cat "/sys/class/net/${PRIMARY_IF}/address")
-  # Last 3 bytes of MAC, uppercase, no colons
   MAC_SUFFIX=$(echo "$MAC" | awk -F':' '{printf("%s%s%s", toupper($(NF-2)), toupper($(NF-1)), toupper($NF))}')
 
   NEW_HOSTNAME="RPI-OEM-${MAC_SUFFIX}"
@@ -137,23 +136,34 @@ else
   echo "$NEW_HOSTNAME" > /etc/hostname
   hostnamectl set-hostname "$NEW_HOSTNAME" || hostname "$NEW_HOSTNAME" || true
 
-  # Update /etc/hosts (remove any existing 127.0.1.1 lines, then add ours)
+  # Update /etc/hosts
   sed -i '/^127\.0\.1\.1\s/d' /etc/hosts
-  echo "127.0.1.1   ${NEW_HOSTNAME} RPI-OEM.local RPI-OEM" >> /etc/hosts
+  echo "127.0.1.1   ${NEW_HOSTNAME}" >> /etc/hosts
 
-  # Make sure mDNS is used in nsswitch
+  # Ensure Avahi and mDNS are installed
+  apt-get install -y avahi-daemon libnss-mdns
   if grep -q '^hosts:' /etc/nsswitch.conf; then
     if ! grep -q 'mdns' /etc/nsswitch.conf; then
       sed -i 's/^hosts:.*/hosts:          files mdns4_minimal [NOTFOUND=return] dns mdns4 mdns/' /etc/nsswitch.conf
     fi
   fi
-
   systemctl enable avahi-daemon || true
   systemctl restart avahi-daemon || true
 
+  # --- Optional: Advertise generic alias RPI-OEM.local via Avahi ---
+  IP=$(hostname -I | awk '{print $1}')
+  if [ -n "$IP" ]; then
+    echo "[factory-bootstrap] Adding Avahi alias for RPI-OEM.local"
+    cat >/etc/avahi/hosts <<EOF
+${IP} ${NEW_HOSTNAME}.local
+${IP} RPI-OEM.local
+EOF
+    systemctl restart avahi-daemon || true
+  fi
+
   echo "[factory-bootstrap] Hostname configured:"
   echo "  ${NEW_HOSTNAME}"
-  echo "[factory-bootstrap] You should be able to SSH using (from same LAN):"
+  echo "[factory-bootstrap] You should be able to SSH using:"
   echo "  builder@${NEW_HOSTNAME}.local"
   echo "  builder@RPI-OEM.local"
 fi
