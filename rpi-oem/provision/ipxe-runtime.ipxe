@@ -1,73 +1,36 @@
 #!ipxe
 
-# Get network config via DHCP
 dhcp
 
-# --- Main menu ---
-:main
-menu TARPN RPi-OEM Factory Installer
+echo
+echo TARPN RPi-OEM Factory Installer
+echo =================================
+echo
+echo  WARNING: This will ERASE all data
+echo  on the first disk (e.g. /dev/sda).
+echo
+echo  If you are not sure, do NOT continue.
+echo
 
-item install  Install TARPN RPi-OEM Factory VM (DESTRUCTIVE: wipes first disk)
-item shell    iPXE shell
-item reboot   Exit and reboot
+# 0x79 is the ASCII code for 'y'
+prompt --key 0x79 --timeout 15000 Press Y within 15s to INSTALL (WIPES DISK). Any other key or timeout = abort && goto install || goto abort
 
-choose --default reboot --timeout 15000 choice || goto main
-goto ${choice}
-
-# --- iPXE shell for debugging ---
-:shell
-echo Dropping to iPXE shell. Type 'exit' to return.
-shell
-goto main
-
-# --- Reboot / exit ---
-:reboot
-echo Rebooting in 5 seconds...
+:abort
+echo
+echo Install aborted. Rebooting...
 sleep 5
 reboot
 
-# --- Install path: show destructive warning & require explicit consent ---
 :install
-clear
-echo
-echo  WARNING:  THIS INSTALLER WILL ERASE ALL DATA ON THE FIRST DISK.
-echo
-echo  - The Debian installer is fully automated (preseeded).
-echo  - It will partition and format the first disk it sees
-echo    (typically /dev/sda for a VM).
-echo  - ALL EXISTING DATA ON THAT DISK WILL BE LOST.
-echo
-echo  If you are not sure this is safe, choose CANCEL.
-echo
-
-:confirm
-menu CONFIRM DESTRUCTIVE INSTALL
-item yes  YES - I understand, WIPE the first disk and install TARPN RPi-OEM
-item no   NO  - Cancel installation and reboot
-
-choose choice || goto confirm
-goto ${choice}
-
-:yes
-echo Proceeding with destructive installation in 5 seconds...
-echo Press Ctrl-] or power off the VM to abort.
-sleep 5
-goto really_install
-
-:no
-goto reboot
-
-# --- Actual netboot + preseeded Debian install ---
-:really_install
 set suite trixie
 set arch amd64
 set mirror http://deb.debian.org/debian
 
-# Preseed file hosted in this GitHub repo
 set preseed_url https://raw.githubusercontent.com/AF4H/TARPN-Contrib/main/rpi-oem/provision/preseed.cfg
 
 set kpath ${mirror}/dists/${suite}/main/installer-${arch}/current/images/netboot/debian-installer/${arch}
 
+echo
 echo Booting Debian ${suite} automated install...
 kernel ${kpath}/linux auto=true priority=critical url=${preseed_url} DEBIAN_FRONTEND=text
 initrd ${kpath}/initrd.gz
