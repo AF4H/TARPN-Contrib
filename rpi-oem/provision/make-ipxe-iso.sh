@@ -15,18 +15,19 @@ mkdir -p "$OUT_DIR"
 
 echo "[make-ipxe-iso] Installing build deps (if needed)..."
 apt-get update -y
-apt-get install -y git build-essential
+apt-get install -y git build-essential binutils mtools syslinux isolinux
 
 if [ ! -d "$IPXE_SRC_DIR/.git" ]; then
   echo "[make-ipxe-iso] Cloning iPXE..."
   git clone https://github.com/ipxe/ipxe.git "$IPXE_SRC_DIR"
 fi
 
-cd "$IPXE_SRC_DIR"
+cd "$IPXE_SRC_DIR/src"
 
 echo "[make-ipxe-iso] Building iPXE ISO with embedded script: $EMBED_SCRIPT"
-make bin/ipxe.iso EMBED="../${EMBED_SCRIPT}"
+make clean
+make bin/ipxe.iso EMBED="../../${EMBED_SCRIPT}"
 
-cp bin/ipxe.iso "../${OUT_ISO}"
+cp bin/ipxe.iso "../../${OUT_ISO}"
 
 echo "[make-ipxe-iso] Done. ISO at: ${OUT_ISO}"
