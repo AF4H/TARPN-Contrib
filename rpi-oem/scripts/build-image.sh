@@ -10,7 +10,9 @@
 #   - a local file         -> .img / .img.xz / .img.gz / .zip
 #   - a URL                -> http(s)://... (possibly compressed)
 #
-# LABEL is looked up in base-images.cfg as: LABEL=URL or LABEL=OTHERLABEL
+# LABEL is looked up in base-images.cfg as:
+#   LABEL=URL            (e.g. STABLE=https://...)
+#   LABEL=OTHERLABEL     (e.g. DEFAULT=STABLE alias)
 
 set -euo pipefail
 
@@ -59,6 +61,39 @@ for t in "${REQUIRED_TOOLS[@]}"; do
     exit 1
   fi
 done
+
+# --------------------------------------------------------------------
+# Helper: download a URL into CACHE_DIR, preserving final filename
+#   - Follows redirects (-L)
+#   - Uses remote filename from final URL (-O)
+#   - Returns full path to the downloaded file
+# --------------------------------------------------------------------
+download_to_cache() {
+  local url="$1"
+  local label="$2"  # currently unused, but handy for logging / future
+
+  mkdir -p "$CACHE_DIR"
+  echo "[build-image] Downloading $url ..."
+  (
+    cd "$CACHE_DIR"
+    # -L: follow redirects; -O: save as remote filename (from final URL)
+    curl -fLO "$url"
+  )
+
+  # Pick the most recently modified file in CACHE_DIR as the one we just downloaded.
+  # This is safe in practice since builds are sequential on this VM.
+  local dest
+  dest="$(ls -t "$CACHE_DIR" | head -n1)"
+  dest="${CACHE_DIR}/${dest}"
+
+  if [[ ! -f "$dest" ]]; then
+    echo "[build-image] ERROR: Download failed for $url" >&2
+    exit 1
+  fi
+
+  echo "[build-image] Saved as: $dest"
+  echo "$dest"
+}
 
 # --------------------------------------------------------------------
 # Helper: auto-decompress compressed images
@@ -142,8 +177,9 @@ decompress_if_needed() {
 
 # --------------------------------------------------------------------
 # Helper: resolve label from base-images.cfg, supporting aliases
-#   DEFAULT=STABLE
-#   STABLE=https://...
+#   Example:
+#     DEFAULT=STABLE
+#     STABLE=https://downloads.raspberrypi.org/raspios_lite_armhf_latest
 # --------------------------------------------------------------------
 resolve_label() {
   local label="$1"
@@ -187,15 +223,8 @@ if [[ -n "$SRC" && -f "$SRC" ]]; then
 
 elif [[ -n "$SRC" && "$SRC" =~ ^https?:// ]]; then
   # Direct URL
-  FNAME="$(basename "$SRC")"
-  CACHE_FILE="${CACHE_DIR}/${FNAME}"
   echo "[build-image] Downloading base image from URL: $SRC"
-  if [[ ! -f "$CACHE_FILE" ]]; then
-    curl -fL "$SRC" -o "$CACHE_FILE"
-  else
-    echo "[build-image] Using cached file: $CACHE_FILE"
-  fi
-  BASE_SRC="$CACHE_FILE"
+  BASE_SRC="$(download_to_cache "$SRC" "manual")"
 
 else
   # No explicit SRC: use LABEL (default DEFAULT) from base-images.cfg
@@ -207,16 +236,8 @@ else
   LABEL_TARGET="$(resolve_label "$LABEL")" || exit 1
   echo "[build-image] Resolving label '$LABEL' to URL: $LABEL_TARGET"
 
-  FNAME="$(basename "$LABEL_TARGET")"
-  CACHE_FILE="${CACHE_DIR}/${LABEL}-${FNAME}"
-
-  if [[ ! -f "$CACHE_FILE" ]]; then
-    echo "[build-image] Downloading base image for label $LABEL ..."
-    curl -fL "$LABEL_TARGET" -o "$CACHE_FILE"
-  else
-    echo "[build-image] Using cached file for label $LABEL: $CACHE_FILE"
-  fi
-  BASE_SRC="$CACHE_FILE"
+  echo "[build-image] Downloading base image for label $LABEL ..."
+  BASE_SRC="$(download_to_cache "$LABEL_TARGET" "$LABEL")"
 fi
 
 if [[ ! -f "$BASE_SRC" ]]; then
