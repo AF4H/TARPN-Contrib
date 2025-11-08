@@ -1,0 +1,12 @@
+/* provision/ipxe-config.local
+ *
+ * Extra config for iPXE build, enabling HTTPS downloads.
+ */
+
+#define DOWNLOAD_PROTO_HTTPS   /* Enable HTTPS support */
+#define DOWNLOAD_PROTO_HTTP    /* Keep HTTP too, just in case */
+
+/* Optional: enable DNS, NTP etc if you ever need them
+ * #define DNS_RESOLVER
+ * #define NTP_CMD
+ */

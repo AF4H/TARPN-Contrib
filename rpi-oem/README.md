@@ -1,11 +1,11 @@
 # TARPN-Contrib: Raspberry Pi OEM Image Factory
 
 **Project:** `AF4H/TARPN-Contrib/rpi-oem`
-**Purpose:** Automate building and testing customized Raspberry Pi OS images (“OEM images”) entirely from a stock Debian 13 (amd64) virtual machine.
+**Purpose:** Automate building and testing customized Raspberry Pi OS images (\u201cOEM images\u201d) entirely from a stock Debian 13 (amd64) virtual machine.
 
 ---
 
-## 🧭 Overview
+## \ud83e\udded Overview
 
 This system creates a **reproducible Raspberry Pi image factory** inside a fresh Debian 13 VM.
 
@@ -15,23 +15,24 @@ Once provisioned, the factory can:
 
 * Download base Raspberry Pi OS images by label (e.g. `DEFAULT`, `BUSTER`)
 * Apply overlays and package customizations
-* Build new “OEM” images
+* Build new \u201cOEM\u201d images
 * Test those images under QEMU emulation (Pi 3B)
 
-No prebuilt VM images are distributed — everything builds from upstream Debian and the files in this repository.
+No prebuilt VM images are distributed \u2014 everything builds from upstream Debian and the files in this repository.
 
 ---
 
-## 🧉 Directory Layout
+## \ud83e\uddc9 Directory Layout
 
 ```
 rpi-oem/
 ├─ provision/
 │  ├─ ipxe-bootstrap.ipxe      # Tiny static script baked into ISO
 │  ├─ ipxe-runtime.ipxe        # Live script chained from GitHub
+│  ├─ ipxe-config.local        # Enables HTTPS support in iPXE build
 │  ├─ preseed.cfg              # Debian 13 unattended installer config
 │  ├─ factory-bootstrap.sh     # Bootstraps Debian into build factory
-│  ├─ make-ipxe-iso.sh         # Builds the static iPXE ISO
+│  ├─ make-ipxe-iso.sh         # Builds HTTPS-capable iPXE ISO
 │
 ├─ scripts/
 │  ├─ setup-build-host.sh      # Installs QEMU + build tools
@@ -49,25 +50,23 @@ rpi-oem/
 
 ---
 
-## 🚀 Provisioning the Factory VM
+## \ud83d\ude80 Provisioning the Factory VM
 
-### 1. Build the iPXE ISO (one-time)
+### 1. Build the HTTPS-Capable iPXE ISO
 
-On any Linux host:
+On any Linux host (preferably Debian 12/13):
 
 ```bash
-cd rpi-oem
-sudo provision/make-ipxe-iso.sh
+cd rpi-oem/provision
+sudo ./make-ipxe-iso.sh
 ```
 
-This produces:
+The script will:
 
-```
-artifacts/factory-bootstrap.iso
-```
-
-That ISO is **static**; it just chain-loads the live iPXE script from GitHub.
-You rarely need to rebuild it unless the GitHub path changes.
+* Check for and install any missing dependencies (build tools, TLS libs, etc.)
+* Clone the iPXE source code if needed.
+* Build an HTTPS-enabled ISO using `libmbedtls`.
+* Output `rpi-oem/artifacts/factory-bootstrap.iso`.
 
 ### 2. Launch a new VM (any hypervisor)
 
@@ -83,8 +82,8 @@ Attach `factory-bootstrap.iso` as the CD/DVD, boot the VM, and walk away.
 ### 3. Automated installation flow
 
 1. iPXE boots from the ISO.
-2. iPXE downloads `ipxe-runtime.ipxe` from GitHub.
-3. The runtime script downloads the Debian 13 netboot installer and `preseed.cfg`.
+2. iPXE downloads provisioning scripts from GitHub over HTTPS.
+3. The runtime script loads the Debian 13 netboot installer and `preseed.cfg`.
 4. Debian installs itself automatically.
 5. The installer's `late_command` downloads and runs `factory-bootstrap.sh`.
 6. That script installs build tools, clones this repo, and runs `setup-build-host.sh`.
@@ -94,14 +93,14 @@ After first boot:
 
 ```bash
 ssh builder@<factory-vm-ip>
-# or if local console:
+# or local console:
 login: builder
 password: changeme  # (set in preseed.cfg)
 ```
 
 ---
 
-## 🛠️ Building OEM Images
+## \ud83d\udee0\ufe0f Building OEM Images
 
 The factory provides a command-line wrapper `rpi-build` (points to `scripts/build-image.sh`).
 
@@ -116,10 +115,10 @@ The script can use any of:
 `base-images.cfg` example:
 
 ```ini
-DEFAULT=https://example.com/rpi-img/tarpn-stable.img
-STABLE=https://example.com/rpi-img/tarpn-stable.img
-BUSTER=https://example.com/rpi-img/tarpn-buster.img
-BOOKWORM=https://example.com/rpi-img/tarpn-bookworm.img
+DEFAULT=https://downloads.raspberrypi.org/raspios_lite_armhf_latest
+STABLE=https://downloads.raspberrypi.org/raspios_lite_armhf_latest
+BUSTER=https://archive.raspberrypi.org/images/raspios_oldstable_lite_armhf_latest
+BOOKWORM=https://downloads.raspberrypi.org/raspios_lite_armhf_latest
 ```
 
 ### Usage examples
@@ -142,7 +141,7 @@ All downloaded images are cached in `rpi-oem/base-cache/`.
 
 ---
 
-## 🤪 Testing OEM Images
+## \ud83e\udd2a Testing OEM Images
 
 The factory also provides `rpi-test` (points to `scripts/test-image.sh`).
 
@@ -170,7 +169,7 @@ PASS
 
 ---
 
-## 🛠️ Customization Points
+## \ud83d\udee0\ufe0f Customization Points
 
 | File                   | Purpose                                                    |
 | ---------------------- | ---------------------------------------------------------- |
@@ -181,11 +180,12 @@ PASS
 | `factory-bootstrap.sh` | Controls how a Debian VM becomes a build host              |
 | `preseed.cfg`          | Defines how the Debian 13 installer behaves                |
 | `ipxe-runtime.ipxe`    | Controls which Debian suite and preseed to use             |
-| `make-ipxe-iso.sh`     | Rebuilds the static iPXE boot ISO if URLs change           |
+| `ipxe-config.local`    | Enables HTTPS/TLS for iPXE downloads                       |
+| `make-ipxe-iso.sh`     | Rebuilds HTTPS-capable iPXE boot ISO                       |
 
 ---
 
-## 🖥️ Supported Hypervisors
+## \ud83d\udda5\ufe0f Supported Hypervisors
 
 Because the factory boots via a standard ISO and installs Debian from the Internet,
 it runs on any hypervisor that can boot an ISO and provide network connectivity:
@@ -200,21 +200,21 @@ No per-platform adjustments are required.
 
 ---
 
-## 🔁 Updating the Factory
+## \ud83d\udd01 Updating the Factory
 
-The ISO (`factory-bootstrap.iso`) only chains to a GitHub-hosted iPXE script.
+The ISO (`factory-bootstrap.iso`) chains directly to GitHub-hosted provisioning scripts over HTTPS.
 You can update any of the following without touching the ISO:
 
-* `ipxe-runtime.ipxe` — change Debian version, mirrors, or preseed URL
-* `preseed.cfg` — change installer behavior or user credentials
-* `factory-bootstrap.sh` — change bootstrap logic or dependency list
-* `base-images.cfg` — repoint image labels (e.g., `STABLE`, `BUSTER`)
+* `ipxe-runtime.ipxe` \u2014 change Debian version, mirrors, or preseed URL
+* `preseed.cfg` \u2014 change installer behavior or user credentials
+* `factory-bootstrap.sh` \u2014 change bootstrap logic or dependency list
+* `base-images.cfg` \u2014 repoint image labels (e.g., `STABLE`, `BUSTER`)
 
 Next time anyone boots from the ISO, the new configuration takes effect automatically.
 
 ---
 
-## ⚙️ Typical End-to-End Flow
+## \u2699\ufe0f Typical End-to-End Flow
 
 ```bash
 # 1. (One-time) build the ISO
@@ -236,7 +236,7 @@ rpi-test "$LATEST"
 
 ---
 
-## 🤌 Roadmap / Future Enhancements
+## \ud83e\udd0c Roadmap / Future Enhancements
 
 * `--refresh` flag for `rpi-build` to force re-download of cached base images
 * Integration with pi-gen for full RPi OS rebuilds
