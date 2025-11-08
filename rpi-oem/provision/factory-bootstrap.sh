@@ -91,20 +91,24 @@ case "$VIRT" in
     systemctl enable qemu-guest-agent 2>/dev/null || true
     systemctl restart qemu-guest-agent 2>/dev/null || true
     ;;
+
   oracle|virtualbox)
     echo "[factory-bootstrap] Installing VirtualBox guest tools..."
     apt-get install -y virtualbox-guest-dkms virtualbox-guest-utils || true
     ;;
+
   vmware)
     echo "[factory-bootstrap] Installing VMware guest tools (open-vm-tools)..."
     apt-get install -y open-vm-tools || true
     systemctl enable open-vm-tools 2>/dev/null || true
     systemctl restart open-vm-tools 2>/dev/null || true
     ;;
+
   microsoft)
     echo "[factory-bootstrap] Installing Hyper-V guest tools (best effort)..."
     apt-get install -y linux-cloud-tools-common hyperv-daemons 2>/dev/null || true
     ;;
+
   *)
     echo "[factory-bootstrap] No specific guest tools for virtualization type: ${VIRT}"
     ;;

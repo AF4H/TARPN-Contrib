@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # scripts/build-image.sh
-set -euo pipefail
-
-# --------------------------------------------------------------------
+# Build a customized Raspberry Pi OEM image from a base image (local, URL, or label).
+#
 # Usage:
 #   build-image.sh [--label=LABEL] [SRC] [name-suffix]
 #
 # SRC can be:
-#   - empty                -> use LABEL (default: DEFAULT) in base-images.cfg
-#   - a local file path    -> .img / .img.xz / .img.gz / .zip
+#   - empty                -> use LABEL (default: DEFAULT) from base-images.cfg
+#   - a local file         -> .img / .img.xz / .img.gz / .zip
 #   - a URL                -> http(s)://... (possibly compressed)
 #
-# LABEL is looked up in base-images.cfg as: LABEL=URL
-# --------------------------------------------------------------------
+# LABEL is looked up in base-images.cfg as: LABEL=URL or LABEL=OTHERLABEL
 
+set -euo pipefail
+
+# --------------------------------------------------------------------
+# Argument parsing
+# --------------------------------------------------------------------
 LABEL="DEFAULT"
 ARGS=()
 
@@ -46,6 +49,18 @@ BASE_CFG="${REPO_ROOT}/base-images.cfg"
 mkdir -p "${ARTIFACTS_DIR}" "${CACHE_DIR}"
 
 # --------------------------------------------------------------------
+# Sanity checks: required tools
+# --------------------------------------------------------------------
+REQUIRED_TOOLS=(xz gunzip unzip losetup mount curl rsync)
+for t in "${REQUIRED_TOOLS[@]}"; do
+  if ! command -v "$t" >/dev/null 2>&1; then
+    echo "[build-image] ERROR: Required tool '$t' not found in PATH." >&2
+    echo "[build-image]        Make sure setup-build-host.sh has been run on this VM." >&2
+    exit 1
+  fi
+done
+
+# --------------------------------------------------------------------
 # Helper: auto-decompress compressed images
 #   Supports:
 #     - *.img       -> used as is
@@ -65,17 +80,13 @@ decompress_if_needed() {
       ;;
 
     *.img.xz|*.xz)
-      if ! command -v xz >/dev/null 2>&1; then
-        echo "[build-image] ERROR: 'xz' not found. Please install xz-utils." >&2
-        exit 1
-      fi
       dir="$(dirname "$path")"
       base="$(basename "$path" .xz)"
       out="${dir}/${base}"
       if [[ ! -f "$out" ]]; then
         echo "[build-image] Decompressing $path -> $out ..."
         xz -dk "$path"
-        # some xz versions may write into cwd; ensure final path is as expected
+        # Some xz versions may write into cwd; fix path if needed
         if [[ ! -f "$out" && -f "${base}" ]]; then
           mv "${base}" "$out"
         fi
@@ -86,10 +97,6 @@ decompress_if_needed() {
       ;;
 
     *.img.gz|*.gz)
-      if ! command -v gunzip >/dev/null 2>&1; then
-        echo "[build-image] ERROR: 'gunzip' not found. Please install gzip." >&2
-        exit 1
-      fi
       dir="$(dirname "$path")"
       base="$(basename "$path" .gz)"
       out="${dir}/${base}"
@@ -103,10 +110,6 @@ decompress_if_needed() {
       ;;
 
     *.zip)
-      if ! command -v unzip >/dev/null 2>&1; then
-        echo "[build-image] ERROR: 'unzip' not found. Please 'apt-get install unzip'." >&2
-        exit 1
-      fi
       dir="$(dirname "$path")"
       base="$(basename "$path" .zip)"
       outdir="${dir}/${base}-unzipped"
@@ -135,6 +138,40 @@ decompress_if_needed() {
       echo "$path"
       ;;
   esac
+}
+
+# --------------------------------------------------------------------
+# Helper: resolve label from base-images.cfg, supporting aliases
+#   DEFAULT=STABLE
+#   STABLE=https://...
+# --------------------------------------------------------------------
+resolve_label() {
+  local label="$1"
+  local depth=0
+  local value
+
+  while (( depth < 8 )); do
+    value="$(grep -E "^[[:space:]]*${label}=" "$BASE_CFG" | sed -e 's/^[[:space:]]*'"$label"'=//' | head -n1 || true)"
+
+    if [[ -z "$value" ]]; then
+      echo "[build-image] ERROR: Label '$label' not found in base-images.cfg." >&2
+      return 1
+    fi
+
+    # If it looks like a URL, we're done
+    if [[ "$value" =~ ^https?:// ]]; then
+      echo "$value"
+      return 0
+    fi
+
+    # Otherwise assume it's an alias to another label (e.g. DEFAULT=STABLE)
+    echo "[build-image] Label '$label' is an alias to '$value'..."
+    label="$value"
+    (( depth++ ))
+  done
+
+  echo "[build-image] ERROR: Too many alias indirections while resolving labels (possible loop)." >&2
+  return 1
 }
 
 # --------------------------------------------------------------------
@@ -167,19 +204,15 @@ else
     exit 1
   fi
 
-  LABEL_URL="$(grep -E "^[[:space:]]*${LABEL}=" "$BASE_CFG" | sed -e 's/^[[:space:]]*'"$LABEL"'=//' | head -n1 || true)"
-  if [[ -z "$LABEL_URL" ]]; then
-    echo "[build-image] Label '$LABEL' not found in base-images.cfg." >&2
-    exit 1
-  fi
+  LABEL_TARGET="$(resolve_label "$LABEL")" || exit 1
+  echo "[build-image] Resolving label '$LABEL' to URL: $LABEL_TARGET"
 
-  echo "[build-image] Resolving label '$LABEL' to URL: $LABEL_URL"
-  FNAME="$(basename "$LABEL_URL")"
+  FNAME="$(basename "$LABEL_TARGET")"
   CACHE_FILE="${CACHE_DIR}/${LABEL}-${FNAME}"
 
   if [[ ! -f "$CACHE_FILE" ]]; then
     echo "[build-image] Downloading base image for label $LABEL ..."
-    curl -fL "$LABEL_URL" -o "$CACHE_FILE"
+    curl -fL "$LABEL_TARGET" -o "$CACHE_FILE"
   else
     echo "[build-image] Using cached file for label $LABEL: $CACHE_FILE"
   fi
