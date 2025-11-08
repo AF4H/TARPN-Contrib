@@ -5,6 +5,9 @@ on:
     tags:
       - "rpi-oem-v*"
 
+permissions:
+  contents: write
+
 jobs:
   build-and-release-iso:
     runs-on: ubuntu-22.04
