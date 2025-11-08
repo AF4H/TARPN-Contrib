@@ -1,253 +1,219 @@
-# TARPN-Contrib: Raspberry Pi OEM Image Factory
+# TARPN Raspberry Pi OEM Factory Environment
 
-**Project:** `AF4H/TARPN-Contrib/rpi-oem`
-**Purpose:** Automate building and testing customized Raspberry Pi OS images (\u201cOEM images\u201d) entirely from a stock Debian 13 (amd64) virtual machine.
-
----
-
-## \ud83e\udded Overview
-
-This system creates a **reproducible Raspberry Pi image factory** inside a fresh Debian 13 VM.
-
-The VM can be launched automatically from an iPXE ISO, which installs Debian 13 unattended and runs a bootstrap script that sets up the entire factory.
-
-Once provisioned, the factory can:
-
-* Download base Raspberry Pi OS images by label (e.g. `DEFAULT`, `BUSTER`)
-* Apply overlays and package customizations
-* Build new \u201cOEM\u201d images
-* Test those images under QEMU emulation (Pi 3B)
-
-No prebuilt VM images are distributed \u2014 everything builds from upstream Debian and the files in this repository.
+This project builds, tests, and distributes custom Raspberry Pi OS images pre-loaded with TARPN or AF4H-contributed packages and configuration.
+It provides a reproducible build system that runs on a standard **Debian 13 (amd64)** virtual machine using only open-source tooling.
 
 ---
 
-## \ud83e\uddc9 Directory Layout
+## 🔄 Overview
 
-```
-rpi-oem/
-├─ provision/
-│  ├─ ipxe-bootstrap.ipxe      # Tiny static script baked into ISO
-│  ├─ ipxe-runtime.ipxe        # Live script chained from GitHub
-│  ├─ ipxe-config.local        # Enables HTTPS support in iPXE build
-│  ├─ preseed.cfg              # Debian 13 unattended installer config
-│  ├─ factory-bootstrap.sh     # Bootstraps Debian into build factory
-│  ├─ make-ipxe-iso.sh         # Builds HTTPS-capable iPXE ISO
-│
-├─ scripts/
-│  ├─ setup-build-host.sh      # Installs QEMU + build tools
-│  ├─ build-image.sh           # Builds OEM images from base images
-│  ├─ extract-boot.sh          # Extracts /boot partition for QEMU
-│  ├─ run-qemu-rpi3b.sh        # Boots image in QEMU (Pi 3B emulation)
-│  ├─ guest-smoketest.sh       # Smoke test run inside the guest
-│  └─ test-image.sh            # Launches QEMU and runs smoketest
-│
-├─ base-images.cfg             # Label → URL map for base images
-├─ package-list.txt            # Packages to install in the OEM image
-├─ overlay-rootfs/             # Files to overlay into OEM image rootfs
-└─ artifacts/                  # Built & tested image outputs (gitignored)
-```
+The factory environment automatically:
+
+1. Installs a minimal Debian 13 VM (via iPXE + preseed + CloudInit)
+2. Bootstraps that VM into a self-contained **OEM image factory**
+3. Builds and tests Raspberry Pi images from canonical base images
+4. Publishes those artifacts for distribution or deployment
 
 ---
 
-## \ud83d\ude80 Provisioning the Factory VM
-
-### 1. Build the HTTPS-Capable iPXE ISO
-
-On any Linux host (preferably Debian 12/13):
+## 🚀 QuickStart for Testers
 
 ```bash
-cd rpi-oem/provision
-sudo ./make-ipxe-iso.sh
+# Clone the project
+git clone https://github.com/AF4H/TARPN-Contrib.git
+cd TARPN-Contrib/rpi-oem
+
+# Prepare the host VM (Debian 13 amd64)
+sudo ./scripts/setup-build-host.sh
+
+# Build the default (STABLE) Raspberry Pi OS image
+./scripts/build-image.sh
+
+# Or build a specific label (see base-images.cfg)
+./scripts/build-image.sh --label=BUSTER
 ```
 
-The script will:
+After building, images appear in:
 
-* Check for and install any missing dependencies (build tools, TLS libs, etc.)
-* Clone the iPXE source code if needed.
-* Build an HTTPS-enabled ISO using `libmbedtls`.
-* Output `rpi-oem/artifacts/factory-bootstrap.iso`.
-
-### 2. Launch a new VM (any hypervisor)
-
-| Setting | Recommended                        |
-| ------- | ---------------------------------- |
-| CPUs    | 2+                                 |
-| RAM     | 4 GB+                              |
-| Disk    | 40 GB+                             |
-| Network | NAT or bridged (Internet required) |
-
-Attach `factory-bootstrap.iso` as the CD/DVD, boot the VM, and walk away.
-
-### 3. Automated installation flow
-
-1. iPXE boots from the ISO.
-2. iPXE downloads provisioning scripts from GitHub over HTTPS.
-3. The runtime script loads the Debian 13 netboot installer and `preseed.cfg`.
-4. Debian installs itself automatically.
-5. The installer's `late_command` downloads and runs `factory-bootstrap.sh`.
-6. That script installs build tools, clones this repo, and runs `setup-build-host.sh`.
-7. The VM reboots into a ready-to-use factory.
-
-After first boot:
-
-```bash
-ssh builder@<factory-vm-ip>
-# or local console:
-login: builder
-password: changeme  # (set in preseed.cfg)
+```
+rpi-oem/artifacts/
 ```
 
 ---
 
-## \ud83d\udee0\ufe0f Building OEM Images
+## 🧰 Directory Layout
 
-The factory provides a command-line wrapper `rpi-build` (points to `scripts/build-image.sh`).
+| Path              | Purpose                                                |
+| ----------------- | ------------------------------------------------------ |
+| `provision/`      | iPXE, preseed, and bootstrap automation scripts        |
+| `scripts/`        | Build, setup, and test tooling                         |
+| `overlay-rootfs/` | Optional files copied into each image during build     |
+| `artifacts/`      | Output directory for `.img` and `.iso` files           |
+| `base-images.cfg` | Label mapping for upstream Raspberry Pi OS base images |
 
-### Base image selection
+---
 
-The script can use any of:
+## 🧩 Factory Bootstrap
 
-* A **local `.img` file**
-* A **direct URL** (`http(s)://...`)
-* A **label** defined in `base-images.cfg`
+The Debian 13 host installs and runs:
 
-`base-images.cfg` example:
+```
+rpi-oem/provision/factory-bootstrap.sh
+```
+
+That script:
+
+* Installs base dependencies and build tools
+* Clones the `AF4H/TARPN-Contrib` repository
+* Runs `scripts/setup-build-host.sh`
+* Detects virtualization and installs guest agents (KVM, VirtualBox, VMware, Hyper-V)
+* Configures Avahi/mDNS and dynamic hostnames (`RPI-OEM-<MACSUFFIX>.local`)
+* Provides convenient wrapper commands:
+
+```bash
+rpi-build        # Build Pi images from base-images.cfg
+rpi-test         # Launch a test VM or hardware run
+factory-status   # Display factory info and toolchain health
+```
+
+Accessible locally as:
+
+```
+builder@RPI-OEM.local
+builder@RPI-OEM-XXXXXX.local
+```
+
+---
+
+## ⚙️ Base Image Configuration (`base-images.cfg`)
+
+Example:
 
 ```ini
-DEFAULT=https://downloads.raspberrypi.org/raspios_lite_armhf_latest
+# Default label just aliases STABLE
+DEFAULT=STABLE
+
+# Latest 32-bit Raspberry Pi OS Lite (Bookworm)
 STABLE=https://downloads.raspberrypi.org/raspios_lite_armhf_latest
-BUSTER=https://archive.raspberrypi.org/images/raspios_oldstable_lite_armhf_latest
-BOOKWORM=https://downloads.raspberrypi.org/raspios_lite_armhf_latest
+
+# Older releases
+BUSTER=https://downloads.raspberrypi.org/raspios_oldstable_armhf/images/raspios_oldstable_armhf-2021-05-28/2021-05-07-raspios-buster-armhf-lite.img.xz
 ```
 
-### Usage examples
+**Alias logic:**
+
+* `DEFAULT=STABLE` means a plain `rpi-build` pulls whatever `STABLE` currently points to.
+* Any label may alias another (chains up to 8 levels deep).
+* The final value may be a URL or a local path (`.img`, `.xz`, `.gz`, `.zip`).
+
+---
+
+## 🤩 Script Reference
+
+### `scripts/setup-build-host.sh`
+
+Installs the full toolchain required to manipulate Raspberry Pi images:
+
+* `qemu-user-static`, `binfmt-support`
+* `kpartx`, `losetup`, `rsync`, `parted`, `dosfstools`, `e2fsprogs`
+* `xz-utils`, `gzip`, `unzip`, `bzip2`
+* `vim`, `less`, and networking utilities
+
+Safe to re-run; missing packages are added automatically.
+
+### `scripts/build-image.sh`
+
+Builds a new OEM image from a base image label, file, or URL.
+
+Features:
+
+* Label aliasing (`DEFAULT → STABLE`)
+* Redirect-aware downloads (preserves real filenames)
+* Auto-decompression of `.xz`, `.gz`, `.zip` archives
+* Optional overlay of `overlay-rootfs/`
+* Optional package installation inside chroot (via `package-list.txt`)
+* Produces ready-to-flash `.img` in `artifacts/`
+
+Example:
 
 ```bash
-# Build using the DEFAULT image (from base-images.cfg)
+# Use default (DEFAULT=STABLE)
 rpi-build
 
-# Build using a specific label
+# Explicit label
 rpi-build --label=BUSTER
 
-# Build using a direct URL
-rpi-build https://example.com/rpi-img/experimental.img exp-oem
-
-# Build using a local file
-rpi-build /srv/rpi-oem/base-images/raspios-lite.img my-oem
+# Explicit URL
+rpi-build https://example.com/my-base.img.xz
 ```
 
-All downloaded images are cached in `rpi-oem/base-cache/`.
+### `provision/make-ipxe-iso.sh`
+
+Builds a **self-contained iPXE ISO** with embedded bootstrap script:
+
+* Enables HTTPS, DNS, and CloudInit support in iPXE
+* Embeds `ipxe-bootstrap.ipxe` (chainloads runtime config from GitHub)
+* Produces `rpi-oem/artifacts/factory-bootstrap.iso`
 
 ---
 
-## \ud83e\udd2a Testing OEM Images
+## 🧮 Automated GitHub Builds
 
-The factory also provides `rpi-test` (points to `scripts/test-image.sh`).
+The ISO is rebuilt automatically on every change to provisioning scripts.
 
-```bash
-rpi-test artifacts/20251108-oem.img
+| Workflow             | Trigger                                           | Artifact / Output                       |
+| -------------------- | ------------------------------------------------- | --------------------------------------- |
+| **Build iPXE ISO**   | Push to `rpi-oem/provision/**` or manual dispatch | ISO artifact in Actions tab             |
+| **Release iPXE ISO** | Git tag `rpi-oem-v*`                              | Published release with downloadable ISO |
+
+**Latest ISO artifact:**
+[➡️ Actions › Build iPXE ISO](https://github.com/AF4H/TARPN-Contrib/actions/workflows/build-ipxe-iso.yml)
+
+**Stable release download:**
+[⬇️ factory-bootstrap.iso (latest)](https://github.com/AF4H/TARPN-Contrib/releases/latest/download/factory-bootstrap.iso)
+
+Badge:
+
+[![Build iPXE ISO](https://github.com/AF4H/TARPN-Contrib/actions/workflows/build-ipxe-iso.yml/badge.svg)](https://github.com/AF4H/TARPN-Contrib/actions/workflows/build-ipxe-iso.yml)
+
+---
+
+## 🧠 Advanced Topics
+
+### Hostname and Avahi behavior
+
+Each VM’s hostname is derived from the last 3 octets of its primary NIC MAC:
+
+```
+RPI-OEM-<MACSUFFIX>.local
 ```
 
-This performs:
-
-1. Extract `/boot` files.
-2. Launch QEMU as a Raspberry Pi 3B.
-3. Wait for SSH.
-4. Upload and run `guest-smoketest.sh` inside the emulated Pi.
-5. Log results in `artifacts/test-*/`.
-
-Example smoketest output:
+and advertised over mDNS together with a generic alias:
 
 ```
-[smoketest] Hostname:
-raspberrypi
-[smoketest] Uptime:
- 13:10:05 up 1 min
-PASS
+RPI-OEM.local
 ```
 
----
+### Virtualization support
 
-## \ud83d\udee0\ufe0f Customization Points
+`factory-bootstrap.sh` automatically detects and installs the correct guest tools:
 
-| File                   | Purpose                                                    |
-| ---------------------- | ---------------------------------------------------------- |
-| `overlay-rootfs/`      | Files copied into the image root (configs, services, etc.) |
-| `package-list.txt`     | List of Debian packages to install inside the image        |
-| `guest-smoketest.sh`   | Validation checks run inside the emulated Pi               |
-| `base-images.cfg`      | Maps build labels to base image URLs                       |
-| `factory-bootstrap.sh` | Controls how a Debian VM becomes a build host              |
-| `preseed.cfg`          | Defines how the Debian 13 installer behaves                |
-| `ipxe-runtime.ipxe`    | Controls which Debian suite and preseed to use             |
-| `ipxe-config.local`    | Enables HTTPS/TLS for iPXE downloads                       |
-| `make-ipxe-iso.sh`     | Rebuilds HTTPS-capable iPXE boot ISO                       |
+* **KVM/QEMU:** `qemu-guest-agent`, `spice-vdagent`
+* **VirtualBox:** `virtualbox-guest-dkms`, `virtualbox-guest-utils`
+* **VMware:** `open-vm-tools`
+* **Hyper-V:** `hyperv-daemons`
 
 ---
 
-## \ud83d\udda5\ufe0f Supported Hypervisors
+## 🧾 Maintenance Notes
 
-Because the factory boots via a standard ISO and installs Debian from the Internet,
-it runs on any hypervisor that can boot an ISO and provide network connectivity:
-
-* **Proxmox VE**
-* **VirtualBox**
-* **VMware Workstation / Fusion**
-* **KVM / QEMU**
-* **Bare metal x86 hardware**
-
-No per-platform adjustments are required.
+* Keep all project URLs in `base-images.cfg` — no need to re-embed into scripts.
+* To test installer changes without rebuilding the ISO, just edit `ipxe-bootstrap.ipxe` or related GitHub-hosted scripts; the ISO chainloads them dynamically.
+* The iPXE ISO can safely be treated as static between releases.
 
 ---
 
-## \ud83d\udd01 Updating the Factory
+## 📜 License
 
-The ISO (`factory-bootstrap.iso`) chains directly to GitHub-hosted provisioning scripts over HTTPS.
-You can update any of the following without touching the ISO:
-
-* `ipxe-runtime.ipxe` \u2014 change Debian version, mirrors, or preseed URL
-* `preseed.cfg` \u2014 change installer behavior or user credentials
-* `factory-bootstrap.sh` \u2014 change bootstrap logic or dependency list
-* `base-images.cfg` \u2014 repoint image labels (e.g., `STABLE`, `BUSTER`)
-
-Next time anyone boots from the ISO, the new configuration takes effect automatically.
-
----
-
-## \u2699\ufe0f Typical End-to-End Flow
-
-```bash
-# 1. (One-time) build the ISO
-sudo provision/make-ipxe-iso.sh
-
-# 2. Boot a blank VM with that ISO attached
-#    -> Debian 13 auto-installs and configures the factory
-
-# 3. Inside the factory VM:
-cd /srv/rpi-oem
-
-# Build the latest OEM image
-rpi-build --label=STABLE
-
-# Test the result under QEMU
-LATEST=$(ls artifacts/*STABLE*.img | sort | tail -n1)
-rpi-test "$LATEST"
-```
-
----
-
-## \ud83e\udd0c Roadmap / Future Enhancements
-
-* `--refresh` flag for `rpi-build` to force re-download of cached base images
-* Integration with pi-gen for full RPi OS rebuilds
-* Extended smoke-tests (services, network behavior, radio stack checks)
-* Optional `factory-status.sh` for diagnostics
-
----
-
-**Maintainer:** `AF4H / TARPN-Contrib`
-**License:** GPLv3 or later (adjust as needed)
-
----
-
-*When the Internet crashes, ham radio is ready to serve.*
+All scripts are released under the MIT License unless otherwise noted.
+© 2025 Donald McMorris (AF4H)

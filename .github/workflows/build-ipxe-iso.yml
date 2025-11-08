@@ -1,0 +1,35 @@
+name: Build iPXE ISO
+
+on:
+  push:
+    paths:
+      - "rpi-oem/provision/**"
+      - ".github/workflows/build-ipxe-iso.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-22.04
+    name: Build factory-bootstrap.iso
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare environment
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y git curl make gcc binutils isolinux xorriso syslinux-utils liblzma-dev
+          chmod +x rpi-oem/provision/make-ipxe-iso.sh
+
+      - name: Build ISO
+        working-directory: rpi-oem/provision
+        run: |
+          echo "[workflow] Starting make-ipxe-iso.sh ..."
+          sudo ./make-ipxe-iso.sh
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-bootstrap-iso
+          path: rpi-oem/artifacts/factory-bootstrap.iso

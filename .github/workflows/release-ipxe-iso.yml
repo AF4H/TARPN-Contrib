@@ -1,0 +1,29 @@
+name: Release iPXE ISO
+
+on:
+  push:
+    tags:
+      - "rpi-oem-v*"
+
+jobs:
+  build-and-release-iso:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Make make-ipxe-iso.sh executable
+        run: chmod +x rpi-oem/provision/make-ipxe-iso.sh
+
+      - name: Build factory-bootstrap ISO
+        run: |
+          cd rpi-oem/provision
+          sudo ./make-ipxe-iso.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rpi-oem/artifacts/factory-bootstrap.iso
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
