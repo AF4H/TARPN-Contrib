@@ -9,8 +9,10 @@ echo
 echo "[system]"
 echo "  Hostname      : $(hostname)"
 if command -v hostnamectl >/dev/null 2>&1; then
-  echo "  Pretty name   : $(hostnamectl --static 2>/dev/null || true)"
-  echo "  Chassis/VM    : $(hostnamectl | awk -F: '/Virtualization/ {gsub(/^[ \t]+/,\"\",$2); print $2}' 2>/dev/null || echo '?')"
+  hc_pretty=$(hostnamectl --static 2>/dev/null || true)
+  hc_virt=$(hostnamectl 2>/dev/null | awk -F: '/Virtualization/ {gsub(/^[ \t]+/, "", $2); print $2}')
+  echo "  Pretty name   : ${hc_pretty:-?}"
+  echo "  Chassis/VM    : ${hc_virt:-?}"
 fi
 echo
 
@@ -21,51 +23,88 @@ if command -v systemd-detect-virt >/dev/null 2>&1; then
 else
   VIRT="unknown"
 fi
+
+# Extra VirtualBox detection via DMI (in case systemd-detect-virt lies)
+if [ -d /sys/class/dmi/id ] && grep -qi virtualbox /sys/class/dmi/id/product_name 2>/dev/null; then
+  VIRT="virtualbox"
+fi
+
 echo "  Detected type : ${VIRT}"
 echo
 
 # --- Guest tools per hypervisor ---
 echo "[guest tools]"
+
 case "$VIRT" in
   kvm|qemu)
     echo "  Expect: qemu-guest-agent, spice-vdagent"
-    systemctl is-active qemu-guest-agent >/dev/null 2>&1 && \
-      echo "  qemu-guest-agent : active" || echo "  qemu-guest-agent : NOT active"
+    if systemctl is-active qemu-guest-agent >/dev/null 2>&1; then
+      echo "  qemu-guest-agent    : active"
+    else
+      echo "  qemu-guest-agent    : NOT active"
+    fi
+    if systemctl is-active spice-vdagentd >/dev/null 2>&1; then
+      echo "  spice-vdagentd      : active"
+    else
+      echo "  spice-vdagentd      : NOT active (often OK if no SPICE console)"
+    fi
     ;;
+
   oracle|virtualbox)
     echo "  Expect: virtualbox-guest-dkms, virtualbox-guest-utils"
-    dpkg -s virtualbox-guest-dkms >/dev/null 2>&1 && \
-      echo "  virtualbox-guest-dkms : installed" || echo "  virtualbox-guest-dkms : NOT installed"
-    dpkg -s virtualbox-guest-utils >/dev/null 2>&1 && \
-      echo "  virtualbox-guest-utils: installed" || echo "  virtualbox-guest-utils: NOT installed"
+    if dpkg -s virtualbox-guest-dkms >/dev/null 2>&1; then
+      echo "  virtualbox-guest-dkms : installed"
+    else
+      echo "  virtualbox-guest-dkms : NOT installed"
+    fi
+    if dpkg -s virtualbox-guest-utils >/dev/null 2>&1; then
+      echo "  virtualbox-guest-utils: installed"
+    else
+      echo "  virtualbox-guest-utils: NOT installed"
+    fi
+    # Check for loaded modules
+    if lsmod 2>/dev/null | grep -q '^vboxguest'; then
+      echo "  kernel modules        : vboxguest loaded"
+    else
+      echo "  kernel modules        : vboxguest NOT loaded"
+    fi
     ;;
+
   vmware)
     echo "  Expect: open-vm-tools"
-    systemctl is-active open-vm-tools >/dev/null 2>&1 && \
-      echo "  open-vm-tools : active" || echo "  open-vm-tools : NOT active"
+    if systemctl is-active open-vm-tools >/dev/null 2>&1; then
+      echo "  open-vm-tools      : active"
+    else
+      echo "  open-vm-tools      : NOT active"
+    fi
     ;;
+
   microsoft)
     echo "  Expect: Hyper-V daemons (best-effort)"
-    dpkg -l | grep -E 'hyperv|linux-cloud-tools' >/dev/null 2>&1 && \
-      echo "  Hyper-V tools : present (check dpkg -l for details)" || \
-      echo "  Hyper-V tools : not detected"
+    if dpkg -l 2>/dev/null | grep -Eq 'hyperv-daemons|hyperv-tools'; then
+      echo "  Hyper-V pkgs       : present"
+    else
+      echo "  Hyper-V pkgs       : not detected"
+    fi
     ;;
+
   *)
     echo "  No specific guest tools expected for: ${VIRT}"
     ;;
 esac
+
 echo
 
 # --- Avahi / mDNS status ---
 echo "[network / mDNS]"
 if systemctl is-active avahi-daemon >/dev/null 2>&1; then
-  echo "  avahi-daemon : active"
+  echo "  avahi-daemon   : active"
 else
-  echo "  avahi-daemon : NOT active"
+  echo "  avahi-daemon   : NOT active"
 fi
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-echo "  IPv4 address : ${IP:-unknown}"
+echo "  IPv4 address   : ${IP:-unknown}"
 
 if [ -f /etc/avahi/hosts ]; then
   echo "  /etc/avahi/hosts:"
@@ -81,24 +120,35 @@ PROJECT_DIR="/srv/TARPN-Contrib/rpi-oem"
 REPO_DIR="/srv/TARPN-Contrib"
 
 if [ -d "$PROJECT_DIR" ]; then
-  echo "  Project dir   : ${PROJECT_DIR}"
+  echo "  Project dir    : ${PROJECT_DIR}"
 else
-  echo "  Project dir   : MISSING (${PROJECT_DIR})"
+  echo "  Project dir    : MISSING (${PROJECT_DIR})"
 fi
 
 if [ -d "${REPO_DIR}/.git" ]; then
   cd "${REPO_DIR}"
   BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
   COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
-  echo "  Git status    : branch ${BRANCH}, commit ${COMMIT}"
+  echo "  Git status     : branch ${BRANCH}, commit ${COMMIT}"
 else
-  echo "  Git status    : NOT a git repo in ${REPO_DIR}"
+  echo "  Git status     : NOT a git repo in ${REPO_DIR}"
 fi
+echo
+
+# --- Build host toolchain sanity (key tools) ---
+echo "[build host toolchain]"
+for t in qemu-arm-static kpartx losetup rsync xz gunzip unzip; do
+  if command -v "$t" >/dev/null 2>&1; then
+    echo "  ${t} : OK ($(command -v "$t"))"
+  else
+    echo "  ${t} : MISSING"
+  fi
+done
 echo
 
 # --- Factory tools ---
 echo "[factory tools]"
-for cmd in rpi-build rpi-test; do
+for cmd in rpi-build rpi-test factory-status; do
   if command -v "$cmd" >/dev/null 2>&1; then
     echo "  ${cmd} : $(command -v "$cmd")"
   else

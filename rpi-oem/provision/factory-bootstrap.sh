@@ -61,7 +61,6 @@ fi
 cd "${PROJECT_DIR}"
 echo "[factory-bootstrap] Now in project dir: $(pwd)"
 
-# ✅ Ensure scripts are executable
 echo "[factory-bootstrap] Ensuring all project scripts are executable..."
 find "${PROJECT_DIR}" -type f -name "*.sh" -exec chmod +x {} \; || true
 
@@ -86,7 +85,15 @@ if command -v systemd-detect-virt >/dev/null 2>&1; then
 else
   VIRT="unknown"
 fi
-echo "[factory-bootstrap] systemd-detect-virt: ${VIRT}"
+
+# Extra check: some environments under VirtualBox may mis-report
+if [ -d /sys/class/dmi/id ]; then
+  if grep -qi "virtualbox" /sys/class/dmi/id/product_name 2>/dev/null; then
+    VIRT="virtualbox"
+  fi
+fi
+
+echo "[factory-bootstrap] systemd-detect-virt (adjusted): ${VIRT}"
 
 case "$VIRT" in
   kvm|qemu)
@@ -98,7 +105,8 @@ case "$VIRT" in
 
   oracle|virtualbox)
     echo "[factory-bootstrap] Installing VirtualBox guest tools..."
-    apt-get install -y dkms linux-headers-$(uname -r)
+    # Ensure DKMS and kernel headers exist for module build
+    apt-get install -y dkms linux-headers-$(uname -r) || true
     apt-get install -y virtualbox-guest-dkms virtualbox-guest-utils || true
     ;;
 
