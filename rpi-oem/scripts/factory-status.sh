@@ -62,7 +62,6 @@ case "$VIRT" in
     else
       echo "  virtualbox-guest-utils: NOT installed"
     fi
-    # Check for loaded modules
     if lsmod 2>/dev/null | grep -q '^vboxguest'; then
       echo "  kernel modules        : vboxguest loaded"
     else
