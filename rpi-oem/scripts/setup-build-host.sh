@@ -16,7 +16,7 @@ DEPS=(
   git curl wget sudo ca-certificates gnupg lsb-release
 
   # Loopback and filesystem tools
-  kpartx losetup util-linux mount rsync parted dosfstools e2fsprogs
+  kpartx util-linux mount rsync parted dosfstools e2fsprogs
 
   # Emulation / chroot for ARM images
   qemu-user-static binfmt-support
