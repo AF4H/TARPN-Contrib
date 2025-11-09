@@ -285,10 +285,10 @@ mkdir -p /var/lib/rpi-oem
 if [ -f "${PROJECT_DIR}/provision/rpi-oem-first-login.sh" ]; then
   install -m 0755 "${PROJECT_DIR}/provision/rpi-oem-first-login.sh" /usr/local/sbin/rpi-oem-first-login.sh
 else
-  echo "[factory-bootstrap] WARNING: rpi-oem-first-login.sh not found in provision/; skipping."
+  echo "[factory-bootstrap] WARNING: provision/rpi-oem-first-login.sh not found; skipping first-login wizard."
 fi
 
-# Profile hook to run first-login script on interactive shell
+# Profile hook to run first-login script on interactive shells
 cat >/etc/profile.d/rpi-oem-first-login.sh <<'EOF'
 #!/bin/sh
 # Run first-login setup (if not already done) on interactive shells.
