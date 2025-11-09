@@ -41,7 +41,7 @@ rpi-oem/artifacts/
 
 ---
 
-## 🧰 Directory Layout
+## 🧮 Directory Layout
 
 | Path              | Purpose                                                |
 | ----------------- | ------------------------------------------------------ |
@@ -53,7 +53,7 @@ rpi-oem/artifacts/
 
 ---
 
-## 🧩 Factory Bootstrap
+## 👉 Factory Bootstrap
 
 The Debian 13 host installs and runs:
 
@@ -67,7 +67,12 @@ That script:
 * Clones the `AF4H/TARPN-Contrib` repository
 * Runs `scripts/setup-build-host.sh`
 * Detects virtualization and installs guest agents (KVM, VirtualBox, VMware, Hyper-V)
-* Configures Avahi/mDNS and dynamic hostnames (`RPI-OEM-<MACSUFFIX>.local`)
+* Configures a default hostname `rpi-oem` and Avahi/mDNS so the VM is reachable as `rpi-oem.local`
+* Installs a first-login wizard that:
+
+  * Optionally renames the host on first login
+  * Creates a new admin user
+  * Disables the `builder` account
 * Provides convenient wrapper commands:
 
 ```bash
@@ -76,12 +81,52 @@ rpi-test         # Launch a test VM or hardware run
 factory-status   # Display factory info and toolchain health
 ```
 
-Accessible locally as:
+On first boot (before first-login completes), the VM is accessible on the LAN as:
 
 ```
-builder@RPI-OEM.local
-builder@RPI-OEM-XXXXXX.local
+builder@rpi-oem.local
 ```
+
+After the wizard runs, you’ll SSH as your new admin user and the hostname may change.
+
+---
+
+## 🤝 First-Login Wizard
+
+On the **first interactive login** (via console or SSH), the factory runs:
+
+```
+/usr/local/sbin/rpi-oem-first-login.sh
+```
+
+It will:
+
+1. Show the current hostname (default `rpi-oem`) and optionally let you rename it.
+
+2. Prompt you to create a **new admin user** (added to the `sudo` group).
+
+3. Copy SSH authorized keys from `builder` to the new user (if present).
+
+4. Disable the `builder` account (lock password, set shell to `nologin`).
+
+5. Record completion in:
+
+   ```
+   /var/lib/rpi-oem/first-login-done
+   ```
+
+6. Self-delete its scripts:
+
+   * `/usr/local/sbin/rpi-oem-first-login.sh`
+   * `/etc/profile.d/rpi-oem-first-login.sh`
+
+After this, log in as your new user:
+
+```bash
+ssh newuser@<hostname>.local
+```
+
+`builder` should no longer be used for day-to-day access.
 
 ---
 
@@ -108,7 +153,7 @@ BUSTER=https://downloads.raspberrypi.org/raspios_oldstable_armhf/images/raspios_
 
 ---
 
-## 🤩 Script Reference
+## 💪 Script Reference
 
 ### `scripts/setup-build-host.sh`
 
@@ -155,9 +200,19 @@ Builds a **self-contained iPXE ISO** with embedded bootstrap script:
 * Embeds `ipxe-bootstrap.ipxe` (chainloads runtime config from GitHub)
 * Produces `rpi-oem/artifacts/factory-bootstrap.iso`
 
+During install, `preseed.cfg` runs `factory-bootstrap.sh` via:
+
+```cfg
+d-i preseed/late_command string \
+  ... \
+  log-output -t rpi-oem in-target /usr/local/sbin/factory-bootstrap.sh
+```
+
+so you can watch bootstrap logs on the installer’s VT4 console.
+
 ---
 
-## 🧮 Automated GitHub Builds
+## 🤎 Automated GitHub Builds
 
 The ISO is rebuilt automatically on every change to provisioning scripts.
 
@@ -178,20 +233,24 @@ Badge:
 
 ---
 
-## 🧠 Advanced Topics
+## 🧫 Advanced Topics
 
 ### Hostname and Avahi behavior
 
-Each VM’s hostname is derived from the last 3 octets of its primary NIC MAC:
+* Default hostname after install:
+  `rpi-oem`
+* On first login, you may rename the host; the new hostname is written to `/etc/hostname` and `/etc/hosts`.
+* `update-avahi-aliases.sh` keeps `/etc/avahi/hosts` in sync with:
 
-```
-RPI-OEM-<MACSUFFIX>.local
-```
+  * The current IP address
+  * The current hostname (`<hostname>.local`)
+  * The generic alias: `rpi-oem.local`
 
-and advertised over mDNS together with a generic alias:
+So on the LAN you can typically reach the factory as:
 
-```
-RPI-OEM.local
+```text
+<hostname>.local
+rpi-oem.local
 ```
 
 ### Virtualization support
@@ -199,21 +258,24 @@ RPI-OEM.local
 `factory-bootstrap.sh` automatically detects and installs the correct guest tools:
 
 * **KVM/QEMU:** `qemu-guest-agent`, `spice-vdagent`
-* **VirtualBox:** `virtualbox-guest-dkms`, `virtualbox-guest-utils`
+* **VirtualBox:** `virtualbox-guest-dkms`, `virtualbox-guest-utils` (with kernel headers + DKMS)
 * **VMware:** `open-vm-tools`
-* **Hyper-V:** `hyperv-daemons`
+* **Hyper-V:** `hyperv-daemons` (best-effort)
+
+`factory-status` reports whether these tools are installed and active.
 
 ---
 
-## 🧾 Maintenance Notes
+## 📜 Maintenance Notes
 
 * Keep all project URLs in `base-images.cfg` — no need to re-embed into scripts.
 * To test installer changes without rebuilding the ISO, just edit `ipxe-bootstrap.ipxe` or related GitHub-hosted scripts; the ISO chainloads them dynamically.
 * The iPXE ISO can safely be treated as static between releases.
+* The first-login wizard is one-shot: it deletes itself after completion and leaves a flag in `/var/lib/rpi-oem/first-login-done`.
 
 ---
 
-## 📜 License
+## 💚 License
 
 All scripts are released under the MIT License unless otherwise noted.
 © 2025 Donald McMorris (AF4H)
