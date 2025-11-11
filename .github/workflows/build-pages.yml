@@ -1,0 +1,187 @@
+name: Build and publish TARPN Pages (overlays + ISO + index)
+
+on:
+  push:
+    paths:
+      - 'rpi-oem/overlays/**'
+      - 'rpi-oem/provision/**'
+      - '.github/workflows/build-pages.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install required tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            zip git curl make gcc binutils isolinux xorriso syslinux-utils liblzma-dev
+
+      - name: Prepare output directories
+        run: |
+          mkdir -p public/overlays
+          mkdir -p public/ipxe
+
+      ###########################################################################
+      # Build Overlays
+      ###########################################################################
+      - name: Build overlays from rpi-oem/overlays/*/*
+        run: |
+          set -euo pipefail
+          OVERLAY_ROOT="rpi-oem/overlays"
+
+          echo "[build-pages] Scanning for overlays..."
+          for dir in "${OVERLAY_ROOT}"/*/*; do
+            [ -d "$dir" ] || continue
+
+            ns="$(basename "$(dirname "$dir")")"
+            name="$(basename "$dir")"
+            outdir="public/overlays/${ns}"
+            outzip="${outdir}/${name}.zip"
+
+            mkdir -p "$outdir"
+            echo "[build-pages] Building overlay ${ns}/${name} -> ${outzip}"
+
+            (
+              cd "${OVERLAY_ROOT}"
+              zip -r "../../${outzip}" "${ns}/${name}"
+            )
+          done
+
+          echo "[build-pages] Overlays built:"
+          find public/overlays -type f -name '*.zip' -print || true
+
+      ###########################################################################
+      # Build iPXE ISO
+      ###########################################################################
+      - name: Make make-ipxe-iso.sh executable
+        run: chmod +x rpi-oem/provision/make-ipxe-iso.sh
+
+      - name: Build factory-bootstrap ISO
+        run: |
+          cd rpi-oem/provision
+          echo "[build-pages] Starting make-ipxe-iso.sh ..."
+          sudo ./make-ipxe-iso.sh
+
+      - name: Copy ISO into Pages tree
+        run: |
+          if [ -f rpi-oem/artifacts/factory-bootstrap.iso ]; then
+            cp rpi-oem/artifacts/factory-bootstrap.iso public/ipxe/factory-bootstrap.iso
+            echo "[build-pages] Copied ISO to public/ipxe/"
+          else
+            echo "[build-pages] WARNING: ISO not found at rpi-oem/artifacts/factory-bootstrap.iso" >&2
+          fi
+
+      ###########################################################################
+      # Build index.html at site root
+      ###########################################################################
+      - name: Generate index.html
+        run: |
+          set -euo pipefail
+          INDEX="public/index.html"
+
+          {
+            echo '<!doctype html>'
+            echo '<html lang="en">'
+            echo '<head>'
+            echo '  <meta charset="utf-8" />'
+            echo '  <title>TARPN-Contrib Downloads</title>'
+            echo '  <style>'
+            echo '    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }'
+            echo '    h1, h2, h3 { font-weight: 600; }'
+            echo '    ul { line-height: 1.5; }'
+            echo '    code { font-family: monospace; }'
+            echo '  </style>'
+            echo '</head>'
+            echo '<body>'
+            echo '  <h1>TARPN-Contrib Downloads</h1>'
+
+            # ISO link
+            if [ -f "public/ipxe/factory-bootstrap.iso" ]; then
+              echo '  <h2>Factory Bootstrap ISO</h2>'
+              echo '  <p><strong>Latest ISO:</strong> '
+              echo '    <a href="ipxe/factory-bootstrap.iso">factory-bootstrap.iso</a>'
+              echo '  </p>'
+            else
+              echo '  <h2>Factory Bootstrap ISO</h2>'
+              echo '  <p><em>No ISO found in ipxe/.</em></p>'
+            fi
+
+            # Overlays
+            echo '  <h2>Overlays</h2>'
+            if [ -d "public/overlays" ]; then
+              echo '  <ul>'
+              for nsdir in public/overlays/*; do
+                [ -d "$nsdir" ] || continue
+                ns="$(basename "$nsdir")"
+                echo "    <li><strong>${ns}</strong>"
+                echo '      <ul>'
+                for zip in "$nsdir"/*.zip; do
+                  [ -f "$zip" ] || continue
+                  base="$(basename "$zip")"
+                  echo "        <li><a href=\"overlays/${ns}/${base}\">${base}</a></li>"
+                done
+                echo '      </ul>'
+                echo '    </li>'
+              done
+              echo '  </ul>'
+            else
+              echo '  <p><em>No overlays found.</em></p>'
+            fi
+
+            # Other top-level directories
+            echo '  <h2>Other directories</h2>'
+            echo '  <ul>'
+            for d in public/*; do
+              [ -d "$d" ] || continue
+              name="$(basename "$d")"
+              [ "$name" = "overlays" ] && continue
+              [ "$name" = "ipxe" ] && continue
+              echo "    <li><a href=\"${name}/\">${name}/</a></li>"
+            done
+            echo '  </ul>'
+
+            echo '  <hr />'
+            echo '  <p style="font-size: 0.9em; color: #666;">'
+            echo '    This index is auto-generated by <code>.github/workflows/build-pages.yml</code>.'
+            echo '  </p>'
+
+            echo '</body>'
+            echo '</html>'
+          } > "$INDEX"
+
+          echo "[build-pages] Wrote index.html to ${INDEX}"
+
+      ###########################################################################
+      # Deploy to GitHub Pages
+      ###########################################################################
+      - name: Upload site artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
