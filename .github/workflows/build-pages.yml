@@ -39,31 +39,33 @@ jobs:
       ###########################################################################
       # Build Overlays
       ###########################################################################
-      - name: Build overlays from rpi-oem/overlays/*/*
+        - name: Build overlays from rpi-oem/overlays/*/*
         run: |
-          set -euo pipefail
-          OVERLAY_ROOT="rpi-oem/overlays"
+            set -euo pipefail
+            OVERLAY_ROOT="rpi-oem/overlays"
+            OUT_ROOT="$(pwd)/public/overlays"
 
-          echo "[build-pages] Scanning for overlays..."
-          for dir in "${OVERLAY_ROOT}"/*/*; do
+            echo "[build-pages] Scanning for overlays..."
+            for dir in "${OVERLAY_ROOT}"/*/*; do
             [ -d "$dir" ] || continue
 
             ns="$(basename "$(dirname "$dir")")"
             name="$(basename "$dir")"
-            outdir="public/overlays/${ns}"
+            outdir="${OUT_ROOT}/${ns}"
             outzip="${outdir}/${name}.zip"
 
             mkdir -p "$outdir"
-            echo "[build-pages] Building overlay ${ns}/${name} -> ${outzip}"
+            echo "[build-pages] Building overlay ${ns}/${name} -> overlays/${ns}/${name}.zip (contents only)"
 
+            # IMPORTANT: zip the *contents* of the overlay dir, not the dir itself.
             (
-              cd "${OVERLAY_ROOT}"
-              zip -r "../../${outzip}" "${ns}/${name}"
+                cd "$dir"
+                zip -r "${outzip}" .
             )
-          done
+            done
 
-          echo "[build-pages] Overlays built:"
-          find public/overlays -type f -name '*.zip' -print || true
+            echo "[build-pages] Overlays built:"
+            find public/overlays -type f -name '*.zip' -print || true
 
       ###########################################################################
       # Build iPXE ISO
