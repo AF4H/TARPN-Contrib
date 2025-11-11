@@ -7,6 +7,9 @@ set -eu
 PROJECT_DIR="/srv/TARPN-Contrib/rpi-oem"
 BASE_CFG="${PROJECT_DIR}/base-images.cfg"
 
+# Ensure we can see admin binaries
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 echo "=== RPI-OEM Factory Status ==="
 echo
 
