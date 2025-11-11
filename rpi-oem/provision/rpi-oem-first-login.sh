@@ -100,12 +100,15 @@ if id builder >/dev/null 2>&1 && [ -d "/home/builder/.ssh" ]; then
   fi
 fi
 
-# 3) Disable builder account
+# 3) Disable builder account and remove sudo privileges
 if id builder >/dev/null 2>&1; then
-  echo "[first-login] Disabling 'builder' account..."
+  echo "[first-login] Disabling 'builder' account and removing sudo access..."
   $SUDO passwd -l builder 2>/dev/null || true
   $SUDO usermod -L builder 2>/dev/null || true
   $SUDO usermod -s /usr/sbin/nologin builder 2>/dev/null || true
+
+  # Remove passwordless sudo file (and any older variants)
+  $SUDO rm -f /etc/sudoers.d/010_builder-nopasswd /etc/sudoers.d/builder-nopasswd 2>/dev/null || true
 fi
 
 # Mark as done and self-clean

@@ -37,6 +37,17 @@ apt-get install -y \
 # Make sure CA bundle is up to date for GitHub HTTPS
 update-ca-certificates || true
 
+echo "[factory-bootstrap] Granting temporary passwordless sudo to 'builder'..."
+
+if id builder >/dev/null 2>&1; then
+  cat >/etc/sudoers.d/010_builder-nopasswd <<'EOF'
+builder ALL=(ALL) NOPASSWD:ALL
+EOF
+  chmod 440 /etc/sudoers.d/010_builder-nopasswd
+else
+  echo "[factory-bootstrap] WARNING: user 'builder' not found; sudoers entry not created."
+fi
+
 ###############################################################################
 # 2. Clone or update the TARPN-Contrib repo
 ###############################################################################
