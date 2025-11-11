@@ -437,8 +437,11 @@ else
 fi
 
 ###############################################################################
-# 9. Done
+# 9. Post-bootstrap cleanup
 ###############################################################################
+
+echo "[factory-bootstrap] Attempting to eject virtual CD-ROM (if present)..."
+eject /dev/cdrom 2>/dev/null || eject /dev/sr0 2>/dev/null || true
 
 echo "[factory-bootstrap] Bootstrap complete."
 echo "[factory-bootstrap] Default hostname : rpi-oem"
