@@ -1,0 +1,131 @@
+name: Build overlays into gh-pages (namespaced, changed only)
+
+on:
+  push:
+    paths:
+      - 'rpi-oem/overlays/**'
+      - '.github/workflows/build-overlays-gh-pages.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # we need history to diff
+
+      - name: Determine changed overlay subdirectories
+        id: changed
+        run: |
+          set -euo pipefail
+
+          # Find changed files under rpi-oem/overlays/*/*/** in this push
+          # Compare previous commit (or merge base) to current HEAD.
+          BEFORE_SHA="${{ github.event.before }}"
+          AFTER_SHA="${{ github.sha }}"
+
+          echo "Comparing ${BEFORE_SHA}..${AFTER_SHA}"
+
+          # Get list of changed paths, then reduce to unique ns/name dirs
+          changed_dirs="$(
+            git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}" -- 'rpi-oem/overlays/*/*/**' \
+              | awk -F'/' 'NF>=4 {print $3"/"$4}' \
+              | sort -u
+          )"
+
+          if [ -z "$changed_dirs" ]; then
+            echo "No overlay subdirectories changed."
+            echo "changed_list=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed overlay subdirs:"
+          echo "$changed_dirs"
+
+          # Export as a comma-separated list for the next step
+          changed_csv="$(echo "$changed_dirs" | paste -sd',' -)"
+          echo "changed_list=${changed_csv}" >> "$GITHUB_OUTPUT"
+
+      - name: Exit early if nothing changed
+        if: steps.changed.outputs.changed_list == ''
+        run: |
+          echo "Nothing to do."
+
+      - name: Setup worktree for gh-pages
+        if: steps.changed.outputs.changed_list != ''
+        run: |
+          set -euo pipefail
+
+          # Ensure gh-pages exists; create if missing
+          if ! git show-ref --verify --quiet refs/heads/gh-pages; then
+            echo "gh-pages branch does not exist. Creating it."
+            git checkout --orphan gh-pages
+            rm -rf .
+            mkdir -p overlays
+            touch .gitignore
+            git add .gitignore overlays
+            git commit -m "Initialize gh-pages branch"
+            git push origin gh-pages
+            git checkout "${{ github.ref_name }}"
+          fi
+
+          # Use a worktree for gh-pages
+          git worktree add gh-pages gh-pages
+
+      - name: Build zips for changed overlays into gh-pages
+        if: steps.changed.outputs.changed_list != ''
+        run: |
+          set -euo pipefail
+
+          IFS=',' read -r -a changed_array <<< "${{ steps.changed.outputs.changed_list }}"
+
+          OVERLAY_ROOT="rpi-oem/overlays"
+          PAGES_DIR="gh-pages"
+
+          for ns_name in "${changed_array[@]}"; do
+            ns="$(echo "$ns_name" | cut -d'/' -f1)"
+            name="$(echo "$ns_name" | cut -d'/' -f2)"
+
+            src_dir="${OVERLAY_ROOT}/${ns}/${name}"
+            out_dir="${PAGES_DIR}/overlays/${ns}"
+
+            if [ ! -d "$src_dir" ]; then
+              echo "WARNING: source dir no longer exists: ${src_dir} (skipping)"
+              continue
+            fi
+
+            mkdir -p "$out_dir"
+            out_zip="${out_dir}/${name}.zip"
+
+            echo "Rebuilding overlay ${ns}/${name} -> ${out_zip}"
+
+            (
+              cd "${OVERLAY_ROOT}"
+              zip -r "../${out_zip}" "${ns}/${name}"
+            )
+          done
+
+      - name: Commit and push gh-pages updates
+        if: steps.changed.outputs.changed_list != ''
+        run: |
+          set -euo pipefail
+          cd gh-pages
+
+          if git status --porcelain | grep .; then
+            git add overlays
+            git commit -m "Update overlays for ${GITHUB_SHA}"
+            git push origin gh-pages
+          else
+            echo "No changes to commit in gh-pages."
+          fi
+
+      - name: Cleanup worktree
+        if: steps.changed.outputs.changed_list != ''
+        run: |
+          set -euo pipefail
+          git worktree remove gh-pages --force || true

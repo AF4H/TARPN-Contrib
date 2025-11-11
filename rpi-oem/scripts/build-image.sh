@@ -1,334 +1,410 @@
 #!/usr/bin/env bash
-# scripts/build-image.sh
-# Build a customized Raspberry Pi OEM image from a base image (local, URL, or label).
 #
-# Usage:
-#   build-image.sh [--label=LABEL] [SRC] [name-suffix]
+# rpi-oem/scripts/build-image.sh
 #
-# SRC can be:
-#   - empty                -> use LABEL (default: DEFAULT) from base-images.cfg
-#   - a local file         -> .img / .img.xz / .img.gz / .zip
-#   - a URL                -> http(s)://... (possibly compressed)
+# Build a customized Raspberry Pi image from a base image label and optional overlay.
 #
-# LABEL is looked up in base-images.cfg as:
-#   LABEL=URL            (e.g. STABLE=https://...)
-#   LABEL=OTHERLABEL     (e.g. DEFAULT=STABLE alias)
+# Key env vars:
+#   RPI_OEM_WORKDIR  - if set, all artifacts/cache go under this directory.
+#
+# Key options:
+#   --label=NAME         : base image label from base-images.cfg (DEFAULT if omitted)
+#   --overlay=SPEC       : overlay name / URL / path (consult overlay-map.cfg when needed)
+#   --overlay-map=PATH   : override path/URL to overlay-map.cfg
+#   --overlay-image=PATH : direct archive (local file or URL), bypass overlay-map.cfg
+#
 
 set -euo pipefail
 
-# --------------------------------------------------------------------
+########################################
+# Paths and defaults
+########################################
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK_ROOT="${RPI_OEM_WORKDIR:-${REPO_ROOT}}"
+
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-${WORK_ROOT}/artifacts}"
+CACHE_DIR="${CACHE_DIR:-${WORK_ROOT}/base-cache}"
+DEFAULT_OVERLAY_MAP="${REPO_ROOT}/overlays/overlay-map.cfg"
+BASE_IMAGES_CFG="${REPO_ROOT}/base-images.cfg"
+
+mkdir -p "${ARTIFACTS_DIR}" "${CACHE_DIR}"
+
+########################################
+# Helpers
+########################################
+
+usage() {
+  cat <<EOF
+Usage: $0 [OPTIONS]
+
+Options:
+  --label=NAME          Base image label from base-images.cfg (default: DEFAULT)
+  --overlay=SPEC        Overlay to apply. SPEC can be:
+                          - URL (http:// or https://)
+                          - local path to file or directory
+                          - logical name found in overlay-map.cfg (e.g. TADD/Buster)
+  --overlay-map=PATH    Override overlay-map.cfg location (local path or URL)
+  --overlay-image=SPEC  Direct overlay archive (local or URL); bypasses overlay-map
+  --help                Show this help
+
+Environment:
+  RPI_OEM_WORKDIR       Root for artifacts/cache. Defaults to repo root.
+
+EOF
+}
+
+log() {
+  echo "[build-image] $*" >&2
+}
+
+error() {
+  echo "[build-image] ERROR: $*" >&2
+  exit 1
+}
+
+download_to_cache() {
+  local url="$1"
+  local basename dest
+
+  basename="$(basename "${url%%\?*}")"
+  mkdir -p "${CACHE_DIR}/downloads"
+  dest="${CACHE_DIR}/downloads/${basename}"
+
+  if [[ ! -f "$dest" ]]; then
+    log "Downloading ${url} -> ${dest}"
+    curl -L --fail -o "$dest" "$url"
+  else
+    log "Using cached download: ${dest}"
+  fi
+
+  echo "$dest"
+}
+
+extract_archive_to_dir() {
+  local archive="$1"
+  local dest_dir="$2"
+
+  mkdir -p "$dest_dir"
+
+  case "$archive" in
+    *.zip)
+      unzip -o "$archive" -d "$dest_dir"
+      ;;
+    *.tar|*.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.bz2|*.tbz2)
+      tar -xf "$archive" -C "$dest_dir"
+      ;;
+    *)
+      error "Unsupported archive type for overlay: ${archive}"
+      ;;
+  esac
+}
+
+resolve_overlay_map_file() {
+  local spec="$1"
+
+  if [[ -z "$spec" ]]; then
+    echo "$DEFAULT_OVERLAY_MAP"
+    return 0
+  fi
+
+  case "$spec" in
+    http://*|https://*)
+      mkdir -p "${CACHE_DIR}/overlay-maps"
+      local path
+      path="$(download_to_cache "$spec")"
+      echo "$path"
+      return 0
+      ;;
+  esac
+
+  if [[ -f "$spec" ]]; then
+    echo "$spec"
+    return 0
+  fi
+
+  error "overlay map not found: ${spec}"
+}
+
+lookup_overlay_in_map() {
+  local key="$1"
+  local map_file="$2"
+
+  if [[ ! -f "$map_file" ]]; then
+    error "overlay-map.cfg not found at ${map_file}"
+  fi
+
+  local line k v
+  while IFS= read -r line; do
+    # strip comments
+    line="${line%%#*}"
+    # trim leading/trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+
+    k="${line%%=*}"
+    v="${line#*=}"
+
+    # trim
+    k="${k#"${k%%[![:space:]]*}"}"
+    k="${k%"${k##*[![:space:]]}"}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+
+    if [[ "$k" == "$key" ]]; then
+      echo "$v"
+      return 0
+    fi
+  done < "$map_file"
+
+  error "overlay key '${key}' not found in ${map_file}"
+}
+
+resolve_base_image_url() {
+  local label="$1"
+  local cfg="$2"
+
+  if [[ ! -f "$cfg" ]]; then
+    error "base-images.cfg not found at ${cfg}"
+  fi
+
+  local cur="$label"
+  local depth=0
+  local max_depth=10
+  local line k v
+
+  while :; do
+    (( depth++ ))
+    if (( depth > max_depth )); then
+      error "base image resolution loop exceeded max depth for label ${label}"
+    fi
+
+    local found=0
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [[ -z "$line" ]] && continue
+
+      k="${line%%=*}"
+      v="${line#*=}"
+
+      k="${k#"${k%%[![:space:]]*}"}"
+      k="${k%"${k##*[![:space:]]}"}"
+      v="${v#"${v%%[![:space:]]*}"}"
+      v="${v%"${v##*[![:space:]]}"}"
+
+      if [[ "$k" == "$cur" ]]; then
+        found=1
+        if [[ "$v" == http://* || "$v" == https://* ]]; then
+          echo "$v"
+          return 0
+        else
+          cur="$v"
+          break
+        fi
+      fi
+    done < "$cfg"
+
+    if (( ! found )); then
+      error "base image label '${cur}' not found in ${cfg}"
+    fi
+  done
+}
+
+decompress_base_image() {
+  local src="$1"
+  local dest_img="$2"
+
+  case "$src" in
+    *.img)
+      cp "$src" "$dest_img"
+      ;;
+    *.img.xz|*.xz)
+      xz -dkc "$src" > "$dest_img"
+      ;;
+    *.img.gz|*.gz)
+      gunzip -c "$src" > "$dest_img"
+      ;;
+    *.zip)
+      # assume only one .img inside
+      local tmpdir
+      tmpdir="$(mktemp -d "${CACHE_DIR}/unzip-XXXXXX")"
+      unzip -o "$src" -d "$tmpdir"
+      local img
+      img="$(find "$tmpdir" -maxdepth 1 -type f -name '*.img' | head -n1 || true)"
+      [[ -z "$img" ]] && error "no .img found inside ${src}"
+      cp "$img" "$dest_img"
+      ;;
+    *)
+      error "Unsupported base image archive type: ${src}"
+      ;;
+  esac
+}
+
+########################################
 # Argument parsing
-# --------------------------------------------------------------------
+########################################
+
 LABEL="DEFAULT"
-ARGS=()
+OVERLAY_SPEC=""
+OVERLAY_MAP_SPEC=""
+OVERLAY_IMAGE_SPEC=""
 
 for arg in "$@"; do
   case "$arg" in
     --label=*)
-      LABEL="${arg#--label=}"
+      LABEL="${arg#*=}"
       ;;
-    --label)
-      echo "Error: --label requires an argument (--label=BUSTER)" >&2
-      exit 1
+    --overlay=*)
+      OVERLAY_SPEC="${arg#*=}"
+      ;;
+    --overlay-map=*)
+      OVERLAY_MAP_SPEC="${arg#*=}"
+      ;;
+    --overlay-image=*)
+      OVERLAY_IMAGE_SPEC="${arg#*=}"
+      ;;
+    --help|-h)
+      usage
+      exit 0
       ;;
     *)
-      ARGS+=("$arg")
+      error "Unknown option: ${arg}"
       ;;
   esac
 done
 
-SRC="${ARGS[0]:-}"              # optional: path or URL
-SUFFIX="${ARGS[1]:-oem}"
-DATE_STR="$(date +%Y%m%d-%H%M%S)"
+########################################
+# Resolve base image
+########################################
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK_ROOT="${RPI_OEM_WORKDIR:-${REPO_ROOT}}"
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-${WORK_ROOT}/artifacts}"
-CACHE_DIR="${CACHE_DIR:-${WORK_ROOT}/base-cache}"
-OVERLAY_DIR="${REPO_ROOT}/overlay-rootfs"
-PKG_LIST="${REPO_ROOT}/package-list.txt"
-BASE_CFG="${REPO_ROOT}/base-images.cfg"
+log "Using base label: ${LABEL}"
+BASE_URL="$(resolve_base_image_url "$LABEL" "$BASE_IMAGES_CFG")"
+log "Resolved base URL: ${BASE_URL}"
 
-mkdir -p "${ARTIFACTS_DIR}" "${CACHE_DIR}"
+BASE_ARCHIVE="$(download_to_cache "$BASE_URL")"
 
-# --------------------------------------------------------------------
-# Sanity checks: required tools
-# --------------------------------------------------------------------
-REQUIRED_TOOLS=(xz gunzip unzip losetup mount curl rsync)
-for t in "${REQUIRED_TOOLS[@]}"; do
-  if ! command -v "$t" >/dev/null 2>&1; then
-    echo "[build-image] ERROR: Required tool '$t' not found in PATH." >&2
-    echo "[build-image]        Make sure setup-build-host.sh has been run on this VM." >&2
-    exit 1
-  fi
-done
+timestamp="$(date +%Y%m%d-%H%M%S)"
+base_name="$(basename "${BASE_ARCHIVE%.*}")"
+OUT_IMG="${ARTIFACTS_DIR}/${base_name}-oem-${timestamp}.img"
 
-# --------------------------------------------------------------------
-# Helper: download a URL into CACHE_DIR, preserving final filename
-#   - Follows redirects (-L)
-#   - Uses remote filename from final URL (-O)
-#   - Returns full path to the downloaded file
-# --------------------------------------------------------------------
-download_to_cache() {
-  local url="$1"
-  local label="$2"  # currently unused, but handy for logging / future
+log "Decompressing base image ${BASE_ARCHIVE} -> ${OUT_IMG}"
+decompress_base_image "$BASE_ARCHIVE" "$OUT_IMG"
 
-  mkdir -p "$CACHE_DIR"
-  echo "[build-image] Downloading $url ..."
-  (
-    cd "$CACHE_DIR"
-    # -L: follow redirects; -O: save as remote filename (from final URL)
-    curl -fLO "$url"
-  )
+########################################
+# Resolve overlay (if any)
+########################################
 
-  # Pick the most recently modified file in CACHE_DIR as the one we just downloaded.
-  # This is safe in practice since builds are sequential on this VM.
-  local dest
-  dest="$(ls -t "$CACHE_DIR" | head -n1)"
-  dest="${CACHE_DIR}/${dest}"
+# 1) Decide which map file to use (even if it might not be needed)
+OVERLAY_MAP_FILE="$(resolve_overlay_map_file "$OVERLAY_MAP_SPEC")" || true
 
-  if [[ ! -f "$dest" ]]; then
-    echo "[build-image] ERROR: Download failed for $url" >&2
-    exit 1
-  fi
+OVERLAY_SOURCE=""  # URL or local path
+OVERLAY_DIR=""     # extracted directory
 
-  echo "[build-image] Saved as: $dest"
-  echo "$dest"
-}
+# --overlay-image wins if specified
+if [[ -n "$OVERLAY_IMAGE_SPEC" ]]; then
+  OVERLAY_SOURCE="$OVERLAY_IMAGE_SPEC"
 
-# --------------------------------------------------------------------
-# Helper: auto-decompress compressed images
-#   Supports:
-#     - *.img       -> used as is
-#     - *.img.xz,
-#       *.xz        -> decompressed with xz -dk
-#     - *.img.gz,
-#       *.gz        -> decompressed with gunzip -k
-#     - *.zip       -> unzip; finds .img or compressed .img inside
-# --------------------------------------------------------------------
-decompress_if_needed() {
-  local path="$1"
-  local dir base out outdir cand
-
-  case "$path" in
-    *.img)
-      echo "$path"
+elif [[ -n "$OVERLAY_SPEC" ]]; then
+  case "$OVERLAY_SPEC" in
+    http://*|https://*)
+      # direct URL
+      OVERLAY_SOURCE="$OVERLAY_SPEC"
       ;;
-
-    *.img.xz|*.xz)
-      dir="$(dirname "$path")"
-      base="$(basename "$path" .xz)"
-      out="${dir}/${base}"
-      if [[ ! -f "$out" ]]; then
-        echo "[build-image] Decompressing $path -> $out ..."
-        xz -dk "$path"
-        # Some xz versions may write into cwd; fix path if needed
-        if [[ ! -f "$out" && -f "${base}" ]]; then
-          mv "${base}" "$out"
-        fi
-      else
-        echo "[build-image] Using existing decompressed image: $out"
-      fi
-      echo "$out"
+    /*|./*|../*)
+      # path-like
+      OVERLAY_SOURCE="$OVERLAY_SPEC"
       ;;
-
-    *.img.gz|*.gz)
-      dir="$(dirname "$path")"
-      base="$(basename "$path" .gz)"
-      out="${dir}/${base}"
-      if [[ ! -f "$out" ]]; then
-        echo "[build-image] Decompressing $path -> $out ..."
-        gunzip -k "$path"
-      else
-        echo "[build-image] Using existing decompressed image: $out"
-      fi
-      echo "$out"
-      ;;
-
-    *.zip)
-      dir="$(dirname "$path")"
-      base="$(basename "$path" .zip)"
-      outdir="${dir}/${base}-unzipped"
-      mkdir -p "$outdir"
-      echo "[build-image] Extracting ZIP $path -> $outdir ..."
-      unzip -j -o "$path" '*.img*' -d "$outdir" >/dev/null
-
-      cand="$(ls "$outdir"/*.img 2>/dev/null | head -n1 || true)"
-      if [[ -n "$cand" ]]; then
-        echo "$cand"
-        return
-      fi
-
-      cand="$(ls "$outdir"/*.img.xz "$outdir"/*.img.gz 2>/dev/null | head -n1 || true)"
-      if [[ -n "$cand" ]]; then
-        decompress_if_needed "$cand"
-        return
-      fi
-
-      echo "[build-image] ERROR: No .img or compressed .img files found in ZIP: $path" >&2
-      exit 1
-      ;;
-
     *)
-      echo "[build-image] WARNING: Unknown extension for $path; assuming raw .img" >&2
-      echo "$path"
+      # logical name -> consult map
+      if [[ -z "$OVERLAY_MAP_FILE" ]]; then
+        error "overlay specified (${OVERLAY_SPEC}) but overlay-map.cfg not available"
+      fi
+      OVERLAY_SOURCE="$(lookup_overlay_in_map "$OVERLAY_SPEC" "$OVERLAY_MAP_FILE")"
       ;;
   esac
+fi
+
+# Turn OVERLAY_SOURCE into an overlay directory
+if [[ -n "$OVERLAY_SOURCE" ]]; then
+  case "$OVERLAY_SOURCE" in
+    http://*|https://*)
+      local_archive="$(download_to_cache "$OVERLAY_SOURCE")"
+      tmp_dir="$(mktemp -d "${CACHE_DIR}/overlay-XXXXXX")"
+      log "Extracting overlay archive ${local_archive} -> ${tmp_dir}"
+      extract_archive_to_dir "$local_archive" "$tmp_dir"
+      OVERLAY_DIR="$tmp_dir"
+      ;;
+    *)
+      if [[ -d "$OVERLAY_SOURCE" ]]; then
+        OVERLAY_DIR="$OVERLAY_SOURCE"
+      elif [[ -f "$OVERLAY_SOURCE" ]]; then
+        tmp_dir="$(mktemp -d "${CACHE_DIR}/overlay-XXXXXX")"
+        log "Extracting overlay archive ${OVERLAY_SOURCE} -> ${tmp_dir}"
+        extract_archive_to_dir "$OVERLAY_SOURCE" "$tmp_dir"
+        OVERLAY_DIR="$tmp_dir"
+      else
+        error "overlay source not found: ${OVERLAY_SOURCE}"
+      fi
+      ;;
+  esac
+fi
+
+########################################
+# Mount image, apply overlays
+########################################
+
+MNT_ROOT=""
+MNT_BOOT=""
+LOOPDEV=""
+
+cleanup() {
+  set +e
+  if mountpoint -q "$MNT_BOOT"; then umount "$MNT_BOOT"; fi
+  if mountpoint -q "$MNT_ROOT"; then umount "$MNT_ROOT"; fi
+  if [[ -n "$LOOPDEV" ]]; then losetup -d "$LOOPDEV" || true; fi
+  [[ -n "$MNT_BOOT" ]] && rmdir "$MNT_BOOT" || true
+  [[ -n "$MNT_ROOT" ]] && rmdir "$MNT_ROOT" || true
 }
+trap cleanup EXIT
 
-# --------------------------------------------------------------------
-# Helper: resolve label from base-images.cfg, supporting aliases
-#   Example:
-#     DEFAULT=STABLE
-#     STABLE=https://downloads.raspberrypi.org/raspios_lite_armhf_latest
-# --------------------------------------------------------------------
-resolve_label() {
-  local label="$1"
-  local depth=0
-  local value
+MNT_BOOT="$(mktemp -d /tmp/rpi-oem-boot-XXXXXX)"
+MNT_ROOT="$(mktemp -d /tmp/rpi-oem-root-XXXXXX)"
 
-  while (( depth < 8 )); do
-    value="$(grep -E "^[[:space:]]*${label}=" "$BASE_CFG" | sed -e 's/^[[:space:]]*'"$label"'=//' | head -n1 || true)"
-
-    if [[ -z "$value" ]]; then
-      echo "[build-image] ERROR: Label '$label' not found in base-images.cfg." >&2
-      return 1
-    fi
-
-    # If it looks like a URL, we're done
-    if [[ "$value" =~ ^https?:// ]]; then
-      echo "$value"
-      return 0
-    fi
-
-    # Otherwise assume it's an alias to another label (e.g. DEFAULT=STABLE)
-    echo "[build-image] Label '$label' is an alias to '$value'..."
-    label="$value"
-    (( depth++ ))
-  done
-
-  echo "[build-image] ERROR: Too many alias indirections while resolving labels (possible loop)." >&2
-  return 1
-}
-
-# --------------------------------------------------------------------
-# Resolve base image (possibly compressed) from SRC / LABEL / URL
-# --------------------------------------------------------------------
-
-BASE_SRC=""   # may be compressed or already .img
-
-if [[ -n "$SRC" && -f "$SRC" ]]; then
-  # Local file path (could be compressed)
-  BASE_SRC="$(readlink -f "$SRC")"
-  echo "[build-image] Using local base image file: $BASE_SRC"
-
-elif [[ -n "$SRC" && "$SRC" =~ ^https?:// ]]; then
-  # Direct URL
-  echo "[build-image] Downloading base image from URL: $SRC"
-  BASE_SRC="$(download_to_cache "$SRC" "manual")"
-
-else
-  # No explicit SRC: use LABEL (default DEFAULT) from base-images.cfg
-  if [[ ! -f "$BASE_CFG" ]]; then
-    echo "[build-image] base-images.cfg not found; cannot resolve label '$LABEL'." >&2
-    exit 1
-  fi
-
-  LABEL_TARGET="$(resolve_label "$LABEL")" || exit 1
-  echo "[build-image] Resolving label '$LABEL' to URL: $LABEL_TARGET"
-
-  echo "[build-image] Downloading base image for label $LABEL ..."
-  BASE_SRC="$(download_to_cache "$LABEL_TARGET" "$LABEL")"
-fi
-
-if [[ ! -f "$BASE_SRC" ]]; then
-  echo "[build-image] Base source '$BASE_SRC' not found after resolution." >&2
-  exit 1
-fi
-
-# Auto-decompress if needed, to get a usable .img
-BASE_IMG="$(decompress_if_needed "$BASE_SRC")"
-
-if [[ ! -f "$BASE_IMG" ]]; then
-  echo "[build-image] ERROR: Decompressed base image '$BASE_IMG' not found." >&2
-  exit 1
-fi
-
-OUT_IMG="${ARTIFACTS_DIR}/${DATE_STR}-${SUFFIX}.img"
-echo "[build-image] Copying base image to ${OUT_IMG} ..."
-cp --reflink=auto "$BASE_IMG" "$OUT_IMG" 2>/dev/null || cp "$BASE_IMG" "$OUT_IMG"
-
-# --------------------------------------------------------------------
-# Loop-mount and customize image
-# --------------------------------------------------------------------
-
-LOOPDEV="$(losetup --show -fP "$OUT_IMG")"
-echo "[build-image] Using loop device ${LOOPDEV}"
+log "Setting up loop device for ${OUT_IMG}"
+LOOPDEV="$(losetup --show -Pf "$OUT_IMG")"
+log "Loop device: ${LOOPDEV}"
 
 BOOT_PART="${LOOPDEV}p1"
 ROOT_PART="${LOOPDEV}p2"
 
-MNT_BOOT="/mnt/rpi-oem-boot"
-MNT_ROOT="/mnt/rpi-oem-root"
-mkdir -p "$MNT_BOOT" "$MNT_ROOT"
-
-cleanup() {
-  echo "[build-image] Cleaning up mounts and loop device..."
-  sync || true
-  umount "$MNT_BOOT" 2>/dev/null || true
-  umount "$MNT_ROOT" 2>/dev/null || true
-  losetup -d "$LOOPDEV" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-echo "[build-image] Mounting partitions..."
+log "Mounting boot partition ${BOOT_PART} -> ${MNT_BOOT}"
 mount "$BOOT_PART" "$MNT_BOOT"
+
+log "Mounting root partition ${ROOT_PART} -> ${MNT_ROOT}"
 mount "$ROOT_PART" "$MNT_ROOT"
 
-# Apply overlay-rootfs if present
-if [[ -d "$OVERLAY_DIR" ]]; then
-  echo "[build-image] Applying overlay-rootfs from $OVERLAY_DIR ..."
-  rsync -a "$OVERLAY_DIR"/ "$MNT_ROOT"/
+# Apply overlay from OVERLAY_DIR (if any)
+if [[ -n "$OVERLAY_DIR" && -d "$OVERLAY_DIR" ]]; then
+  log "Applying overlay from ${OVERLAY_DIR} ..."
+  rsync -a "${OVERLAY_DIR}/" "${MNT_ROOT}/"
 else
-  echo "[build-image] No overlay-rootfs directory found, skipping file overlay."
+  log "No overlay specified or resolved; skipping overlay"
 fi
 
-# Copy package list into image if present
-if [[ -f "$PKG_LIST" ]]; then
-  echo "[build-image] Copying package-list.txt into image..."
-  cp "$PKG_LIST" "$MNT_ROOT/package-list.txt"
-fi
-
-# Install packages in chroot using qemu-arm-static
-if [[ -f "$MNT_ROOT/package-list.txt" ]]; then
-  echo "[build-image] Installing packages inside chroot..."
-  if [[ ! -x /usr/bin/qemu-arm-static ]]; then
-    echo "[build-image] /usr/bin/qemu-arm-static not found (did setup-build-host.sh run?)" >&2
-    exit 1
-  fi
-
-  cp /usr/bin/qemu-arm-static "$MNT_ROOT/usr/bin/"
-
-  # Ensure resolv.conf so the chroot can reach APT
-  if [[ ! -e "$MNT_ROOT/etc/resolv.conf" ]]; then
-    echo "nameserver 1.1.1.1" > "$MNT_ROOT/etc/resolv.conf"
-  fi
-
-  chroot "$MNT_ROOT" /usr/bin/qemu-arm-static /bin/bash -c '
-    set -e
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    xargs -a /package-list.txt apt-get install -y
-    apt-get clean
-  '
-
-  rm -f "$MNT_ROOT/usr/bin/qemu-arm-static"
+# Apply local overlay-rootfs last, if present
+LOCAL_OVERLAY_DIR="${REPO_ROOT}/overlay-rootfs"
+if [[ -d "$LOCAL_OVERLAY_DIR" ]]; then
+  log "Applying local overlay-rootfs from ${LOCAL_OVERLAY_DIR} ..."
+  rsync -a "${LOCAL_OVERLAY_DIR}/" "${MNT_ROOT}/"
 else
-  echo "[build-image] No package-list.txt found in image, skipping apt installs."
+  log "No local overlay-rootfs directory found; skipping"
 fi
 
-echo "[build-image] Syncing filesystem..."
+log "Syncing filesystems..."
 sync
 
-echo "[build-image] OEM image built: ${OUT_IMG}"
-echo "$OUT_IMG"
+log "Build complete: ${OUT_IMG}"
+echo "${OUT_IMG}"
