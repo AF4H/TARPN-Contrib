@@ -131,7 +131,7 @@ fi
 ###############################################################################
 
 echo "[factory-bootstrap] Detecting virtualization for guest tools..."
-if command -v systemd-detect-virt >/dev/null 2>&1; then
+if command -v systemd-detect-virt >/devnull 2>&1; then
   VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
 else
   VIRT="unknown"
@@ -202,16 +202,17 @@ fi
 chown -R "${NEW_USER}:${NEW_USER}" "${REPO_DIR}" || true
 
 ###############################################################################
-# 6a. Provide a short MOTD for builder
+# 6a. MOTD and pre-login banner (console)
 ###############################################################################
 
-cat >/etc/motd <<EOF
+# MOTD (shown *after* login)
+cat >/etc/motd <<'EOF'
 TARPN Raspberry Pi OEM Factory VM
 ---------------------------------
 
 This system was provisioned as a build factory for Raspberry Pi images.
 
-Default user:    builder
+Default user:     builder
 Default password: builder
 
 On first login, a wizard will:
@@ -220,6 +221,16 @@ On first login, a wizard will:
   - Disable 'builder' and remove its sudo access
 
 To begin, log in as 'builder' and follow the instructions.
+EOF
+
+# Pre-login banner on console: /etc/issue
+cat >/etc/issue <<'EOF'
+TARPN Raspberry Pi OEM Factory VM
+---------------------------------
+
+Login as 'builder' (password: builder) to run the first-boot wizard.
+
+Hostname: \n
 EOF
 
 ###############################################################################
@@ -292,7 +303,7 @@ fi
 # 7. First-login setup (rename host, new admin user, disable builder)
 ###############################################################################
 
-echo "[factory-bootstrap] Installing first-login setup hooks..."
+echo "[factory-bootstrap] Installing first-login setup (on first login)..."
 
 # Install the first-login script from the repo into /usr/local/sbin
 mkdir -p /var/lib/rpi-oem
@@ -303,29 +314,37 @@ else
   echo "[factory-bootstrap] WARNING: rpi-oem-first-login.sh not found in project; first login wizard will be unavailable."
 fi
 
-# Create a marker file so the first-login script knows it hasn't run yet
+# Marker file so the first-login script knows it hasn't run yet
 touch /var/lib/rpi-oem/first-login-pending
 
-# Add a systemd service to run the first-login script on the first login of 'builder'
-cat >/etc/systemd/system/rpi-oem-first-login.service <<'EOF'
-[Unit]
-Description=TARPN RPi OEM first-login setup
-After=multi-user.target
+# Ensure builder home exists and is owned correctly
+if [ -d "/home/${NEW_USER}" ]; then
+  chown -R "${NEW_USER}:${NEW_USER}" "/home/${NEW_USER}"
+fi
 
-[Service]
-Type=oneshot
-User=builder
-TTYPath=/dev/tty1
-Environment=HOME=/home/builder
-ExecStart=/usr/local/sbin/rpi-oem-first-login.sh
+# Configure builder's login shell to run the first-login script once, on first login
+cat >/home/${NEW_USER}/.profile <<'EOF'
+# ~/.profile for builder - runs the first-boot wizard once on first login.
 
-[Install]
-WantedBy=multi-user.target
+# If the first-login marker exists, run the wizard and then exit the shell.
+if [ -f /var/lib/rpi-oem/first-login-pending ]; then
+  if [ -x /usr/local/sbin/rpi-oem-first-login.sh ]; then
+    /usr/local/sbin/rpi-oem-first-login.sh
+  else
+    echo "WARNING: first-login script /usr/local/sbin/rpi-oem-first-login.sh not found or not executable."
+  fi
+fi
+
+# If an interactive shell is desired after firstboot, exec bash:
+if [ -n "$PS1" ]; then
+  [ -x /bin/bash ] && exec /bin/bash --login || true
+fi
 EOF
 
-systemctl enable rpi-oem-first-login.service 2>/dev/null || true
+chown "${NEW_USER}:${NEW_USER}" "/home/${NEW_USER}/.profile"
+chmod 0644 "/home/${NEW_USER}/.profile"
 
-echo "[factory-bootstrap] First-login service installed. On next boot, log in as 'builder' to complete setup."
+echo "[factory-bootstrap] First-login is now triggered by builder's first login (SSH or console)."
 echo "[factory-bootstrap] Builder login hint:"
 echo "  builder@$(hostname).local"
 
@@ -339,7 +358,7 @@ apt-get install -y openssh-server
 # Disable root SSH login and password auth for root (best effort)
 if [ -f /etc/ssh/sshd_config ]; then
   sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || true
-  # We leave password auth for normal users enabled initially (builder needs it).
+  # Password auth for builder remains enabled initially.
   systemctl restart ssh 2>/dev/null || true
 fi
 
@@ -357,4 +376,4 @@ echo "[factory-bootstrap] On first login as 'builder' you will:"
 echo "  - Optionally rename the host"
 echo "  - Create a new admin user"
 echo "  - Disable 'builder' and remove its sudo access"
-echo "[factory-bootstrap] The first-login wizard will reboot the system automatically when done."
+echo "[factory-bootstrap] The first-login wizard will reboot the system automatically when done (depending on its logic)."
