@@ -22,50 +22,73 @@ echo "[factory-bootstrap] Repo URL      : ${REPO_URL}"
 # 1. Core tooling for bootstrap
 ###############################################################################
 
-echo "[factory-bootstrap] Installing core packages (git, curl, sudo, avahi, etc.)..."
-apt-get update -y || true
+echo "[factory-bootstrap] Updating APT package index..."
+apt-get update -y
+
+echo "[factory-bootstrap] Installing core packages..."
 apt-get install -y \
-  git \
-  ca-certificates \
-  curl \
-  sudo \
-  avahi-daemon \
-  libnss-mdns \
-  systemd \
-  iproute2
+  ca-certificates curl wget git jq vim sudo less \
+  avahi-daemon avahi-utils net-tools dnsutils \
+  lsb-release locales tzdata \
+  bash-completion systemd-sysv eject
 
-# Make sure CA bundle is up to date for GitHub HTTPS
-update-ca-certificates || true
+###############################################################################
+# 1a. Locale and timezone sanity
+###############################################################################
 
-echo "[factory-bootstrap] Granting temporary passwordless sudo to 'builder'..."
+# Set a sane default locale (en_US.UTF-8) if not already configured
+if ! grep -q "^en_US.UTF-8 UTF-8" /etc/locale.gen 2>/dev/null; then
+  echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+fi
 
-if id builder >/dev/null 2>&1; then
-  cat >/etc/sudoers.d/010_builder-nopasswd <<'EOF'
-builder ALL=(ALL) NOPASSWD:ALL
-EOF
-  chmod 440 /etc/sudoers.d/010_builder-nopasswd
-else
-  echo "[factory-bootstrap] WARNING: user 'builder' not found; sudoers entry not created."
+locale-gen en_US.UTF-8
+update-locale LANG=en_US.UTF-8
+
+# Set timezone to UTC unless something else is explicitly configured
+if [ ! -f /etc/timezone ] || ! grep -q "." /etc/timezone 2>/dev/null; then
+  echo "Etc/UTC" > /etc/timezone
+  ln -sf /usr/share/zoneinfo/Etc/UTC /etc/localtime
+  dpkg-reconfigure -f noninteractive tzdata || true
 fi
 
 ###############################################################################
-# 2. Clone or update the TARPN-Contrib repo
+# 1b. Hostname and Avahi baseline
+###############################################################################
+
+DEFAULT_HOSTNAME="rpi-oem"
+CURRENT_HOSTNAME="$(hostname)"
+
+if [ "$CURRENT_HOSTNAME" != "$DEFAULT_HOSTNAME" ]; then
+  echo "[factory-bootstrap] Setting hostname to ${DEFAULT_HOSTNAME}"
+  echo "${DEFAULT_HOSTNAME}" > /etc/hostname
+  sed -i "s/127\.0\.1\.1.*/127.0.1.1\t${DEFAULT_HOSTNAME}/" /etc/hosts || true
+  hostnamectl set-hostname "${DEFAULT_HOSTNAME}" || true
+fi
+
+echo "[factory-bootstrap] Ensuring Avahi is enabled..."
+systemctl enable avahi-daemon 2>/dev/null || true
+systemctl restart avahi-daemon 2>/dev/null || true
+
+###############################################################################
+# 2. Clone or update TARPN-Contrib and rpi-oem
 ###############################################################################
 
 mkdir -p "${BASE_DIR}"
 
 if [ ! -d "${REPO_DIR}/.git" ]; then
-  echo "[factory-bootstrap] Cloning repo into ${REPO_DIR}..."
+  echo "[factory-bootstrap] Cloning TARPN-Contrib repository..."
   git clone "${REPO_URL}" "${REPO_DIR}"
 else
-  echo "[factory-bootstrap] Repo already present; updating..."
-  cd "${REPO_DIR}"
-  git fetch --all || true
-  git reset --hard origin/main 2>/dev/null || git reset --hard origin/master 2>/dev/null || true
+  echo "[factory-bootstrap] Repository already exists; pulling latest..."
+  (
+    cd "${REPO_DIR}"
+    git fetch --all --prune
+    git reset --hard origin/HEAD || git reset --hard origin/main || true
+  )
 fi
 
 if [ ! -d "${PROJECT_DIR}" ]; then
-  echo "[factory-bootstrap] ERROR: Project subdir ${PROJECT_DIR} not found in repo."
+  echo "[factory-bootstrap] ERROR: rpi-oem project directory not found at ${PROJECT_DIR}"
   exit 1
 fi
 
@@ -76,9 +99,26 @@ echo "[factory-bootstrap] Ensuring all project scripts are executable..."
 find "${PROJECT_DIR}" -type f -name "*.sh" -exec chmod +x {} \; || true
 
 ###############################################################################
-# 3. Run setup-build-host.sh (installs QEMU, kpartx, etc.)
+# 3. Install rpi-oem command wrappers into /usr/local/bin
 ###############################################################################
 
+echo "[factory-bootstrap] Installing rpi-oem command wrappers into /usr/local/bin..."
+
+if [ -f "${PROJECT_DIR}/bin/rpi-build" ]; then
+  install -m 0755 "${PROJECT_DIR}/bin/rpi-build" /usr/local/bin/rpi-build
+else
+  echo "[factory-bootstrap] WARNING: ${PROJECT_DIR}/bin/rpi-build not found; skipping install"
+fi
+
+if [ -f "${PROJECT_DIR}/bin/rpi-test" ]; then
+  install -m 0755 "${PROJECT_DIR}/bin/rpi-test" /usr/local/bin/rpi-test
+else
+  echo "[factory-bootstrap] WARNING: ${PROJECT_DIR}/bin/rpi-test not found; skipping install"
+fi
+
+###############################################################################
+# 4. Run setup-build-host.sh (installs QEMU, kpartx, etc.)
+###############################################################################
 if [ -x "./scripts/setup-build-host.sh" ]; then
   echo "[factory-bootstrap] Running scripts/setup-build-host.sh ..."
   ./scripts/setup-build-host.sh
@@ -87,7 +127,7 @@ else
 fi
 
 ###############################################################################
-# 4. VM guest tools (VirtualBox, QEMU/KVM, VMware, Hyper-V)
+# 5. VM guest tools (VirtualBox, QEMU/KVM, VMware, Hyper-V)
 ###############################################################################
 
 echo "[factory-bootstrap] Detecting virtualization for guest tools..."
@@ -132,104 +172,80 @@ case "$VIRT" in
     apt-get install -y linux-cloud-tools-common hyperv-daemons 2>/dev/null || true
     ;;
 
-  *)
-    echo "[factory-bootstrap] No specific guest tools for virtualization type: ${VIRT}"
+  none|container|*)
+    echo "[factory-bootstrap] No special guest tools installed for virtualization=${VIRT}"
     ;;
 esac
 
 ###############################################################################
-# 5. Install convenience wrapper commands (rpi-build, rpi-test, factory-status)
+# 6. Create temporary 'builder' user and grant sudo for first login
 ###############################################################################
 
-echo "[factory-bootstrap] Installing rpi-build and rpi-test wrappers..."
+NEW_USER="builder"
 
-cat >/usr/local/bin/rpi-build <<'EOF'
-#!/bin/sh
-set -eu
-PROJECT_DIR="/srv/TARPN-Contrib/rpi-oem"
-if [ ! -d "$PROJECT_DIR" ]; then
-  echo "rpi-build: project dir $PROJECT_DIR not found." >&2
-  exit 1
-fi
-cd "$PROJECT_DIR"
-exec ./scripts/build-image.sh "$@"
-EOF
-
-cat >/usr/local/bin/rpi-test <<'EOF'
-#!/bin/sh
-set -eu
-PROJECT_DIR="/srv/TARPN-Contrib/rpi-oem"
-if [ ! -d "$PROJECT_DIR" ]; then
-  echo "rpi-test: project dir $PROJECT_DIR not found." >&2
-  exit 1
-fi
-cd "$PROJECT_DIR"
-exec ./scripts/test-image.sh "$@"
-EOF
-
-echo "[factory-bootstrap] Installing factory-status wrapper..."
-
-cat >/usr/local/bin/factory-status <<'EOF'
-#!/bin/sh
-set -eu
-PROJECT_DIR="/srv/TARPN-Contrib/rpi-oem"
-SCRIPT="${PROJECT_DIR}/scripts/factory-status.sh"
-if [ ! -x "$SCRIPT" ]; then
-  echo "factory-status: script $SCRIPT not found or not executable." >&2
-  exit 1
-fi
-exec "$SCRIPT" "$@"
-EOF
-
-chmod +x /usr/local/bin/rpi-build /usr/local/bin/rpi-test /usr/local/bin/factory-status
-
-echo "[factory-bootstrap] Installed:"
-echo "  - /usr/local/bin/rpi-build"
-echo "  - /usr/local/bin/rpi-test"
-echo "  - /usr/local/bin/factory-status"
-
-###############################################################################
-# 6. Default hostname = rpi-oem + Avahi/mDNS
-###############################################################################
-
-echo "[factory-bootstrap] Configuring default hostname 'rpi-oem'..."
-
-NEW_HOSTNAME="rpi-oem"
-
-echo "$NEW_HOSTNAME" > /etc/hostname
-if command -v hostnamectl >/dev/null 2>&1; then
-  hostnamectl set-hostname "$NEW_HOSTNAME" || true
+if ! id "${NEW_USER}" >/dev/null 2>&1; then
+  echo "[factory-bootstrap] Creating temporary user '${NEW_USER}'..."
+  useradd -m -s /bin/bash "${NEW_USER}"
+  echo "${NEW_USER}:${NEW_USER}" | chpasswd
 else
-  hostname "$NEW_HOSTNAME" || true
+  echo "[factory-bootstrap] User '${NEW_USER}' already exists; not recreating."
 fi
 
-# Update /etc/hosts
-sed -i '/^127\.0\.1\.1\s/d' /etc/hosts 2>/dev/null || true
-echo "127.0.1.1   ${NEW_HOSTNAME}" >> /etc/hosts
-
-# Ensure Avahi / mDNS NSS config
-if grep -q '^hosts:' /etc/nsswitch.conf 2>/dev/null; then
-  if ! grep -q 'mdns' /etc/nsswitch.conf 2>/dev/null; then
-    sed -i 's/^hosts:.*/hosts:          files mdns4_minimal [NOTFOUND=return] dns mdns4 mdns/' /etc/nsswitch.conf
-  fi
+# Add builder to sudo
+if ! grep -q "^${NEW_USER} " /etc/sudoers 2>/dev/null; then
+  echo "[factory-bootstrap] Granting passwordless sudo to ${NEW_USER} for bootstrap..."
+  echo "${NEW_USER} ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/90-${NEW_USER}-bootstrap
+  chmod 440 /etc/sudoers.d/90-${NEW_USER}-bootstrap
 fi
 
-systemctl enable avahi-daemon 2>/dev/null || true
-systemctl restart avahi-daemon 2>/dev/null || true
+# Let builder own /srv/TARPN-Contrib if helpful
+chown -R "${NEW_USER}:${NEW_USER}" "${REPO_DIR}" || true
 
-# Helper to keep /etc/avahi/hosts in sync with current IP + hostname
-echo "[factory-bootstrap] Installing update-avahi-aliases helper..."
+###############################################################################
+# 6a. Provide a short MOTD for builder
+###############################################################################
+
+cat >/etc/motd <<EOF
+TARPN Raspberry Pi OEM Factory VM
+---------------------------------
+
+This system was provisioned as a build factory for Raspberry Pi images.
+
+Default user:    builder
+Default password: builder
+
+On first login, a wizard will:
+  - Allow you to rename the host
+  - Create a new admin user
+  - Disable 'builder' and remove its sudo access
+
+To begin, log in as 'builder' and follow the instructions.
+EOF
+
+###############################################################################
+# 6b. Install factory-status script (if present)
+###############################################################################
+
+if [ -x "${PROJECT_DIR}/scripts/factory-status.sh" ]; then
+  echo "[factory-bootstrap] Installing factory-status.sh to /usr/local/bin/factory-status ..."
+  install -m 0755 "${PROJECT_DIR}/scripts/factory-status.sh" /usr/local/bin/factory-status
+else
+  echo "[factory-bootstrap] factory-status.sh not found; skipping."
+fi
+
+###############################################################################
+# 6c. Avahi alias updater (so rpi-oem.local always works)
+###############################################################################
 
 cat >/usr/local/bin/update-avahi-aliases.sh <<'EOF'
 #!/bin/sh
-# Auto-regenerate /etc/avahi/hosts based on current IP and hostname.
-
 set -eu
 
 AVAHI_HOSTS="/etc/avahi/hosts"
 
+# Determine current IPv4 address on primary interface (best effort)
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-HN="$(hostname 2>/dev/null || true)"
+HN="$(hostname)"
 
 if [ -z "${IP:-}" ] || [ -z "${HN:-}" ]; then
   echo "[update-avahi-aliases] Missing IP or hostname; skipping." >&2
@@ -263,118 +279,14 @@ systemctl enable update-avahi-aliases.service 2>/dev/null || true
 
 # Optional: dhclient hook (if using isc-dhcp-client) to run on DHCP renew
 if [ -d /etc/dhcp/dhclient-exit-hooks.d ]; then
-  echo "[factory-bootstrap] Installing DHCP hook for Avahi alias refresh..."
-  cat >/etc/dhcp/dhclient-exit-hooks.d/99-avahi-refresh <<'EOF'
+  cat >/etc/dhcp/dhclient-exit-hooks.d/update-avahi-aliases <<'EOF'
 #!/bin/sh
-# DHCP hook to update Avahi aliases when IP address changes.
-case "$reason" in
-  BOUND|RENEW|REBIND|REBOOT)
-    /usr/local/bin/update-avahi-aliases.sh || true
-    ;;
-esac
-EOF
-  chmod +x /etc/dhcp/dhclient-exit-hooks.d/99-avahi-refresh
-fi
-
-# Initialize Avahi hosts once now
-/usr/local/bin/update-avahi-aliases.sh || true
-
-###############################################################################
-# 6.1 Console banner for first-login state (/etc/issue)
-###############################################################################
-
-echo "[factory-bootstrap] Installing rpi-oem-update-issue helper..."
-
-cat >/usr/local/sbin/rpi-oem-update-issue.sh <<'EOF'
-#!/bin/sh
-# Update /etc/issue based on whether first-login has been completed.
-# Logic:
-#   - If 'builder' exists AND has a login shell AND first-login script exists,
-#     assume first-login not completed yet -> show builder instructions.
-#   - Otherwise show a normal OS banner.
-
-set -eu
-
-ISSUE="/etc/issue"
-
-builder_active=0
-if id builder >/dev/null 2>&1; then
-  SHELL_PATH="$(getent passwd builder | cut -d: -f7 || echo "")"
-  case "$SHELL_PATH" in
-    ""|"/usr/sbin/nologin"|"/bin/false")
-      builder_active=0
-      ;;
-    *)
-      builder_active=1
-      ;;
-  esac
-fi
-
-if [ $builder_active -eq 1 ] && [ -x /usr/local/sbin/rpi-oem-first-login.sh ]; then
-  # First-login not completed yet
-  IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-
-  cat >"$ISSUE" <<EOF_INNER
-It appears you have not logged in to this system yet.
-
-To continue, please login as 'builder' for both the username and password.
-
-From the local console:
-  login:    builder
-  password: builder
-
-Or remotely via ssh:
-  ssh builder@rpi-oem.local
-EOF_INNER
-
-  if [ -n "${IP:-}" ]; then
-    cat >>"$ISSUE" <<EOF_IP
-
-Or by IP address:
-  ssh builder@${IP}
-EOF_IP
-  fi
-
-  cat >>"$ISSUE" <<'EOF_TAIL'
-
-using the password "builder" when prompted.
-
-EOF_TAIL
-
-else
-  # First-login completed (or builder disabled/script gone): show a simple banner
-  OS_NAME="$(lsb_release -ds 2>/dev/null || echo "Debian GNU/Linux")"
-  cat >"$ISSUE" <<EOF_INNER
-${OS_NAME} \n \l
-
-EOF_INNER
+if [ "$reason" = "BOUND" ] || [ "$reason" = "RENEW" ] || [ "$reason" = "REBIND" ] || [ "$reason" = "REBOOT" ]; then
+  /usr/local/bin/update-avahi-aliases.sh || true
 fi
 EOF
-
-chmod +x /usr/local/sbin/rpi-oem-update-issue.sh
-
-cat >/etc/systemd/system/rpi-oem-update-issue.service <<'EOF'
-[Unit]
-Description=Update /etc/issue with RPI-OEM first-login instructions
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/rpi-oem-update-issue.sh
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl enable rpi-oem-update-issue.service 2>/dev/null || true
-
-# Initialize once now so the first console already shows useful info
-/usr/local/sbin/rpi-oem-update-issue.sh || true
-
-echo "[factory-bootstrap] You should be able to SSH using (from same LAN):"
-echo "  builder@rpi-oem.local"
-echo "  builder@$(hostname).local"
+  chmod +x /etc/dhcp/dhclient-exit-hooks.d/update-avahi-aliases
+fi
 
 ###############################################################################
 # 7. First-login setup (rename host, new admin user, disable builder)
@@ -388,52 +300,47 @@ mkdir -p /var/lib/rpi-oem
 if [ -f "${PROJECT_DIR}/provision/rpi-oem-first-login.sh" ]; then
   install -m 0755 "${PROJECT_DIR}/provision/rpi-oem-first-login.sh" /usr/local/sbin/rpi-oem-first-login.sh
 else
-  echo "[factory-bootstrap] WARNING: provision/rpi-oem-first-login.sh not found; skipping first-login wizard."
+  echo "[factory-bootstrap] WARNING: rpi-oem-first-login.sh not found in project; first login wizard will be unavailable."
 fi
 
-# Profile hook to run first-login script as root when 'builder' logs in
-cat >/etc/profile.d/rpi-oem-first-login.sh <<'EOF'
-#!/bin/sh
-# Run first-login setup on interactive login as 'builder', if not yet completed.
+# Create a marker file so the first-login script knows it hasn't run yet
+touch /var/lib/rpi-oem/first-login-pending
 
-# Only for builder
-if [ "$USER" != "builder" ]; then
-  return 0 2>/dev/null || exit 0
-fi
+# Add a systemd service to run the first-login script on the first login of 'builder'
+cat >/etc/systemd/system/rpi-oem-first-login.service <<'EOF'
+[Unit]
+Description=TARPN RPi OEM first-login setup
+After=multi-user.target
 
-# Only interactive shells
-if [ ! -t 0 ]; then
-  return 0 2>/dev/null || exit 0
-fi
+[Service]
+Type=oneshot
+User=builder
+TTYPath=/dev/tty1
+Environment=HOME=/home/builder
+ExecStart=/usr/local/sbin/rpi-oem-first-login.sh
 
-# Only if the first-login script still exists
-if [ ! -x /usr/local/sbin/rpi-oem-first-login.sh ]; then
-  return 0 2>/dev/null || exit 0
-fi
-
-echo
-echo "RPI-OEM: running first-login setup as root..."
-echo
-/usr/bin/sudo /usr/local/sbin/rpi-oem-first-login.sh || echo "RPI-OEM: first-login script failed; please check logs."
+[Install]
+WantedBy=multi-user.target
 EOF
 
-chmod +x /etc/profile.d/rpi-oem-first-login.sh
+systemctl enable rpi-oem-first-login.service 2>/dev/null || true
+
+echo "[factory-bootstrap] First-login service installed. On next boot, log in as 'builder' to complete setup."
+echo "[factory-bootstrap] Builder login hint:"
+echo "  builder@$(hostname).local"
 
 ###############################################################################
-# 8. GRUB timeout = 3 seconds
+# 8. SSH and basic security defaults
 ###############################################################################
 
-echo "[factory-bootstrap] Setting GRUB timeout to 3 seconds (if GRUB present)..."
+echo "[factory-bootstrap] Ensuring SSH server is installed..."
+apt-get install -y openssh-server
 
-if [ -f /etc/default/grub ] && command -v update-grub >/dev/null 2>&1; then
-  if grep -q '^GRUB_TIMEOUT=' /etc/default/grub; then
-    sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=3/' /etc/default/grub
-  else
-    echo 'GRUB_TIMEOUT=3' >> /etc/default/grub
-  fi
-  update-grub || true
-else
-  echo "[factory-bootstrap] GRUB not found or update-grub unavailable; skipping."
+# Disable root SSH login and password auth for root (best effort)
+if [ -f /etc/ssh/sshd_config ]; then
+  sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config || true
+  # We leave password auth for normal users enabled initially (builder needs it).
+  systemctl restart ssh 2>/dev/null || true
 fi
 
 ###############################################################################
