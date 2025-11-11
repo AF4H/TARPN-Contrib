@@ -98,6 +98,11 @@ if id builder >/dev/null 2>&1 && [ -d "/home/builder/.ssh" ]; then
   fi
 fi
 
+# after NEW_USER is created and before reboot:
+su - "$NEW_USER" -c '
+  mkdir -p "$HOME/rpi-oem"/{artifacts,base-cache}
+'
+
 ###############################################################################
 # 3) Disable builder account
 ###############################################################################

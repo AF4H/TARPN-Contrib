@@ -10,9 +10,10 @@ IMG="$1"
 SSH_PORT="${2:-2222}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKDIR="${REPO_ROOT}/artifacts/test-$(date +%Y%m%d-%H%M%S)"
+WORK_ROOT="${RPI_OEM_WORKDIR:-${REPO_ROOT}/artifacts}"
+WORKDIR="${WORK_ROOT}/test-$(date +%Y%m%d-%H%M%S)"
 BOOTDIR="${WORKDIR}/bootfiles"
-LOGFILE="${WORKDIR}/qemu-console.log"
+LOGFILE="${WORKDIR}/qemu-console.log" 
 
 mkdir -p "$WORKDIR" "$BOOTDIR"
 
