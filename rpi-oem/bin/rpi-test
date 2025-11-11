@@ -1,0 +1,20 @@
+#!/bin/sh
+#
+# /usr/local/bin/rpi-test
+# Wrapper for testing RPi OEM images using ~/rpi-oem for workspace.
+#
+
+set -eu
+
+PROJECT_DIR="/srv/TARPN-Contrib/rpi-oem"
+
+if [ ! -d "$PROJECT_DIR" ]; then
+  echo "rpi-test: project dir $PROJECT_DIR not found." >&2
+  exit 1
+fi
+
+export RPI_OEM_WORKDIR="${HOME}/rpi-oem"
+mkdir -p "${RPI_OEM_WORKDIR}"
+
+cd "$PROJECT_DIR"
+exec "$PROJECT_DIR/scripts/test-image.sh" "$@"
