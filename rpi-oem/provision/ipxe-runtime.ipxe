@@ -1,6 +1,6 @@
 #!ipxe
 
-dhcp
+isset ${ip} || dhcp
 
 echo
 echo TARPN RPi-OEM Factory Installer
