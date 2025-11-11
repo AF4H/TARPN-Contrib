@@ -326,16 +326,20 @@ fi
 cat >/home/${NEW_USER}/.profile <<'EOF'
 # ~/.profile for builder - runs the first-boot wizard once on first login.
 
-# If the first-login marker exists, run the wizard and then exit the shell.
+# If the first-login marker exists, run the wizard as root via sudo.
 if [ -f /var/lib/rpi-oem/first-login-pending ]; then
   if [ -x /usr/local/sbin/rpi-oem-first-login.sh ]; then
-    /usr/local/sbin/rpi-oem-first-login.sh
+    echo
+    echo ">>> Running TARPN RPi OEM first-boot wizard (as root via sudo) ..."
+    echo
+    sudo /usr/local/sbin/rpi-oem-first-login.sh
   else
     echo "WARNING: first-login script /usr/local/sbin/rpi-oem-first-login.sh not found or not executable."
   fi
 fi
 
-# If an interactive shell is desired after firstboot, exec bash:
+# After first boot is complete, a normal interactive shell is fine.
+# If this is an interactive session, drop into bash.
 if [ -n "$PS1" ]; then
   [ -x /bin/bash ] && exec /bin/bash --login || true
 fi
