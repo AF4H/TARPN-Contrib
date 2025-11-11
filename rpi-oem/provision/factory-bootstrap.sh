@@ -116,7 +116,7 @@ case "$VIRT" in
 
   oracle|virtualbox)
     echo "[factory-bootstrap] Installing VirtualBox guest tools..."
-    apt-get install -y dkms linux-headers-$(uname -r) || true
+    apt-get install -y dkms "linux-headers-$(uname -r)" || true
     apt-get install -y virtualbox-guest-dkms virtualbox-guest-utils || true
     ;;
 
@@ -197,7 +197,7 @@ echo "[factory-bootstrap] Configuring default hostname 'rpi-oem'..."
 NEW_HOSTNAME="rpi-oem"
 
 echo "$NEW_HOSTNAME" > /etc/hostname
-if command-vox hostnamectl >/dev/null 2>&1 2>/dev/null; then
+if command -v hostnamectl >/dev/null 2>&1; then
   hostnamectl set-hostname "$NEW_HOSTNAME" || true
 else
   hostname "$NEW_HOSTNAME" || true
@@ -279,10 +279,102 @@ fi
 # Initialize Avahi hosts once now
 /usr/local/bin/update-avahi-aliases.sh || true
 
+###############################################################################
+# 6.1 Console banner for first-login state (/etc/issue)
+###############################################################################
+
+echo "[factory-bootstrap] Installing rpi-oem-update-issue helper..."
+
+cat >/usr/local/sbin/rpi-oem-update-issue.sh <<'EOF'
+#!/bin/sh
+# Update /etc/issue based on whether first-login has been completed.
+# Logic:
+#   - If 'builder' exists AND has a login shell AND first-login script exists,
+#     assume first-login not completed yet -> show builder instructions.
+#   - Otherwise show a normal OS banner.
+
+set -eu
+
+ISSUE="/etc/issue"
+
+builder_active=0
+if id builder >/dev/null 2>&1; then
+  SHELL_PATH="$(getent passwd builder | cut -d: -f7 || echo "")"
+  case "$SHELL_PATH" in
+    ""|"/usr/sbin/nologin"|"/bin/false")
+      builder_active=0
+      ;;
+    *)
+      builder_active=1
+      ;;
+  esac
+fi
+
+if [ $builder_active -eq 1 ] && [ -x /usr/local/sbin/rpi-oem-first-login.sh ]; then
+  # First-login not completed yet
+  IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+  cat >"$ISSUE" <<EOF_INNER
+It appears you have not logged in to this system yet.
+
+To continue, please login as 'builder' for both the username and password.
+
+From the local console:
+  login:    builder
+  password: builder
+
+Or remotely via ssh:
+  ssh builder@rpi-oem.local
+EOF_INNER
+
+  if [ -n "${IP:-}" ]; then
+    cat >>"$ISSUE" <<EOF_IP
+
+Or by IP address:
+  ssh builder@${IP}
+EOF_IP
+  fi
+
+  cat >>"$ISSUE" <<'EOF_TAIL'
+
+using the password "builder" when prompted.
+
+EOF_TAIL
+
+else
+  # First-login completed (or builder disabled/script gone): show a simple banner
+  OS_NAME="$(lsb_release -ds 2>/dev/null || echo "Debian GNU/Linux")"
+  cat >"$ISSUE" <<EOF_INNER
+${OS_NAME} \n \l
+
+EOF_INNER
+fi
+EOF
+
+chmod +x /usr/local/sbin/rpi-oem-update-issue.sh
+
+cat >/etc/systemd/system/rpi-oem-update-issue.service <<'EOF'
+[Unit]
+Description=Update /etc/issue with RPI-OEM first-login instructions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/rpi-oem-update-issue.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable rpi-oem-update-issue.service 2>/dev/null || true
+
+# Initialize once now so the first console already shows useful info
+/usr/local/sbin/rpi-oem-update-issue.sh || true
+
 echo "[factory-bootstrap] You should be able to SSH using (from same LAN):"
 echo "  builder@rpi-oem.local"
 echo "  builder@$(hostname).local"
-
 
 ###############################################################################
 # 7. First-login setup (rename host, new admin user, disable builder)
@@ -290,24 +382,39 @@ echo "  builder@$(hostname).local"
 
 echo "[factory-bootstrap] Installing first-login setup hooks..."
 
+# Install the first-login script from the repo into /usr/local/sbin
 mkdir -p /var/lib/rpi-oem
 
-# Install the first-login script from the repo into /usr/local/sbin
 if [ -f "${PROJECT_DIR}/provision/rpi-oem-first-login.sh" ]; then
   install -m 0755 "${PROJECT_DIR}/provision/rpi-oem-first-login.sh" /usr/local/sbin/rpi-oem-first-login.sh
 else
   echo "[factory-bootstrap] WARNING: provision/rpi-oem-first-login.sh not found; skipping first-login wizard."
 fi
 
-# Profile hook to run first-login script on interactive shells
+# Profile hook to run first-login script as root when 'builder' logs in
 cat >/etc/profile.d/rpi-oem-first-login.sh <<'EOF'
 #!/bin/sh
-# Run first-login setup (if not already done) on interactive shells.
-if [ -t 0 ] && [ -x /usr/local/sbin/rpi-oem-first-login.sh ]; then
-  if [ ! -f /var/lib/rpi-oem/first-login-done ]; then
-    /usr/local/sbin/rpi-oem-first-login.sh || true
-  fi
+# Run first-login setup on interactive login as 'builder', if not yet completed.
+
+# Only for builder
+if [ "$USER" != "builder" ]; then
+  return 0 2>/dev/null || exit 0
 fi
+
+# Only interactive shells
+if [ ! -t 0 ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+# Only if the first-login script still exists
+if [ ! -x /usr/local/sbin/rpi-oem-first-login.sh ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+echo
+echo "RPI-OEM: running first-login setup as root..."
+echo
+/usr/bin/sudo /usr/local/sbin/rpi-oem-first-login.sh || echo "RPI-OEM: first-login script failed; please check logs."
 EOF
 
 chmod +x /etc/profile.d/rpi-oem-first-login.sh
@@ -335,9 +442,9 @@ fi
 
 echo "[factory-bootstrap] Bootstrap complete."
 echo "[factory-bootstrap] Default hostname : rpi-oem"
-echo "[factory-bootstrap] Default user     : builder (will be replaced on first login as root)."
-echo "[factory-bootstrap] On first login as root you will:"
+echo "[factory-bootstrap] Default user     : builder (temporary, for first login only)."
+echo "[factory-bootstrap] On first login as 'builder' you will:"
 echo "  - Optionally rename the host"
 echo "  - Create a new admin user"
-echo "  - Disable 'builder'"
-echo "[factory-bootstrap] Reboot is recommended."
+echo "  - Disable 'builder' and remove its sudo access"
+echo "[factory-bootstrap] The first-login wizard will reboot the system automatically when done."

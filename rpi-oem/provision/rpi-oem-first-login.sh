@@ -1,37 +1,32 @@
 #!/bin/sh
 # rpi-oem-first-login.sh
-# Run on first interactive login to:
+# Run ONCE as root (via sudo) on first interactive login to:
 #   - Optionally rename the host
 #   - Create a new admin user
-#   - Disable 'builder'
-# Uses sudo when not run as root, and self-deletes after completion.
+#   - Disable 'builder' and remove its sudo access
+#   - Self-delete and reboot
 
 set -eu
-
-FLAG="/var/lib/rpi-oem/first-login-done"
-
-# Only run once
-if [ -f "$FLAG" ]; then
-  exit 0
-fi
 
 # Only run in interactive shells (has a TTY)
 if [ ! -t 0 ]; then
   exit 0
 fi
 
-# Decide whether to use sudo for privileged operations
+# Must be root – this script is expected to be invoked via sudo
 if [ "$(id -u)" -ne 0 ]; then
-  SUDO="sudo"
-else
-  SUDO=""
+  echo "rpi-oem-first-login.sh: must be run as root (via sudo)." >&2
+  exit 1
 fi
 
 echo
 echo "=== RPI-OEM First Login Setup ==="
 echo
 
+###############################################################################
 # 1) Hostname change
+###############################################################################
+
 CUR_HN="$(hostname)"
 printf "Current hostname is '%s'.\n" "$CUR_HN"
 printf "Enter new hostname (leave blank to keep '%s'): " "$CUR_HN"
@@ -39,25 +34,28 @@ read -r NEW_HN || NEW_HN=""
 
 if [ -n "$NEW_HN" ] && [ "$NEW_HN" != "$CUR_HN" ]; then
   echo "[first-login] Renaming host to '$NEW_HN'..."
-  # /etc/hostname
-  printf "%s\n" "$NEW_HN" | $SUDO tee /etc/hostname >/dev/null
+  printf "%s\n" "$NEW_HN" > /etc/hostname
+
   if command -v hostnamectl >/dev/null 2>&1; then
-    $SUDO hostnamectl set-hostname "$NEW_HN" || true
+    hostnamectl set-hostname "$NEW_HN" || true
   else
-    $SUDO hostname "$NEW_HN" || true
+    hostname "$NEW_HN" || true
   fi
 
-  # /etc/hosts
-  $SUDO sed -i '/^127\.0\.1\.1\s/d' /etc/hosts 2>/dev/null || true
-  printf "127.0.1.1   %s\n" "$NEW_HN" | $SUDO tee -a /etc/hosts >/dev/null
+  # Update /etc/hosts
+  sed -i '/^127\.0\.1\.1\s/d' /etc/hosts 2>/dev/null || true
+  printf "127.0.1.1   %s\n" "$NEW_HN" >> /etc/hosts
 
-  # Refresh Avahi
+  # Refresh Avahi names
   if [ -x /usr/local/bin/update-avahi-aliases.sh ]; then
-    $SUDO /usr/local/bin/update-avahi-aliases.sh || true
+    /usr/local/bin/update-avahi-aliases.sh || true
   fi
 fi
 
+###############################################################################
 # 2) New admin user creation
+###############################################################################
+
 echo
 echo "We will now create a new admin user to replace 'builder'."
 
@@ -80,49 +78,63 @@ while :; do
   break
 done
 
-echo "[first-login] Creating user '$NEW_USER' (you will be prompted for a password, via sudo if needed)..."
-$SUDO adduser "$NEW_USER"
+echo "[first-login] Creating user '$NEW_USER'..."
+useradd -m -s /bin/bash -G sudo "$NEW_USER"
 
-echo "[first-login] Adding '$NEW_USER' to sudo group..."
-$SUDO usermod -aG sudo "$NEW_USER" || true
+echo "[first-login] Set password for '$NEW_USER'..."
+passwd "$NEW_USER"
 
-# Copy SSH keys from builder if present
+# Copy SSH keys from builder if available
 if id builder >/dev/null 2>&1 && [ -d "/home/builder/.ssh" ]; then
   echo "[first-login] Copying SSH keys from 'builder' to '$NEW_USER'..."
-  $SUDO mkdir -p "/home/${NEW_USER}/.ssh"
+  mkdir -p "/home/${NEW_USER}/.ssh"
   if [ -f /home/builder/.ssh/authorized_keys ]; then
-    $SUDO cp -a /home/builder/.ssh/authorized_keys "/home/${NEW_USER}/.ssh/" 2>/dev/null || true
+    cp -a /home/builder/.ssh/authorized_keys "/home/${NEW_USER}/.ssh/" 2>/dev/null || true
   fi
-  $SUDO chown -R "${NEW_USER}:${NEW_USER}" "/home/${NEW_USER}/.ssh"
-  $SUDO chmod 700 "/home/${NEW_USER}/.ssh"
+  chown -R "${NEW_USER}:${NEW_USER}" "/home/${NEW_USER}/.ssh"
+  chmod 700 "/home/${NEW_USER}/.ssh"
   if [ -f "/home/${NEW_USER}/.ssh/authorized_keys" ]; then
-    $SUDO chmod 600 "/home/${NEW_USER}/.ssh/authorized_keys" || true
+    chmod 600 "/home/${NEW_USER}/.ssh/authorized_keys" || true
   fi
 fi
 
-# 3) Disable builder account and remove sudo privileges
-if id builder >/dev/null 2>&1; then
-  echo "[first-login] Disabling 'builder' account and removing sudo access..."
-  $SUDO passwd -l builder 2>/dev/null || true
-  $SUDO usermod -L builder 2>/dev/null || true
-  $SUDO usermod -s /usr/sbin/nologin builder 2>/dev/null || true
+###############################################################################
+# 3) Disable builder account
+###############################################################################
 
-  # Remove passwordless sudo file (and any older variants)
-  $SUDO rm -f /etc/sudoers.d/010_builder-nopasswd /etc/sudoers.d/builder-nopasswd 2>/dev/null || true
+if id builder >/dev/null 2>&1; then
+  echo "[first-login] Disabling 'builder' account..."
+  passwd -l builder 2>/dev/null || true
+  usermod -L builder 2>/dev/null || true
+  usermod -s /usr/sbin/nologin builder 2>/dev/null || true
 fi
 
-# Mark as done and self-clean
-$SUDO mkdir -p /var/lib/rpi-oem
-date_str="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-printf "%s by %s\n" "$date_str" "$NEW_USER" | $SUDO tee "$FLAG" >/dev/null
+###############################################################################
+# 4) Remove passwordless sudo for builder
+###############################################################################
+
+if id builder >/dev/null 2>&1; then
+  echo "[first-login] Removing sudo access for 'builder'..."
+  rm -f /etc/sudoers.d/010_builder-nopasswd /etc/sudoers.d/builder-nopasswd 2>/dev/null || true
+fi
+
+###############################################################################
+# 5) Self-clean: remove this script and its profile hook
+###############################################################################
 
 echo "[first-login] Cleaning up setup scripts..."
-$SUDO rm -f /usr/local/sbin/rpi-oem-first-login.sh /etc/profile.d/rpi-oem-first-login.sh 2>/dev/null || true
+rm -f /usr/local/sbin/rpi-oem-first-login.sh /etc/profile.d/rpi-oem-first-login.sh 2>/dev/null || true
+
+###############################################################################
+# 6) Final notes and reboot
+###############################################################################
 
 echo
 echo "First-login setup complete."
 echo "You should now:"
 echo "  - Open a new SSH session as: ${NEW_USER}@$(hostname).local"
 echo "  - Stop using the 'builder' account."
-echo "  - First-login wizard has been removed (flag: $FLAG)."
 echo
+echo "[first-login] System will reboot now to finalize configuration..."
+sleep 3
+reboot
