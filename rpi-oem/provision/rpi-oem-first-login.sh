@@ -130,6 +130,21 @@ fi
 echo "[first-login] Cleaning up setup scripts..."
 rm -f /usr/local/sbin/rpi-oem-first-login.sh /etc/profile.d/rpi-oem-first-login.sh 2>/dev/null || true
 
+# Clean up firstboot indicators and reset /etc/issue
+if [ -f /var/lib/rpi-oem/first-login-pending ]; then
+  rm -f /var/lib/rpi-oem/first-login-pending
+fi
+
+# Replace /etc/issue with a normal banner
+cat >/etc/issue <<'EOF'
+TARPN Raspberry Pi OEM System
+-----------------------------
+
+System configured. Login as your admin account.
+
+Hostname: \n
+EOF
+
 ###############################################################################
 # 6) Final notes and reboot
 ###############################################################################
