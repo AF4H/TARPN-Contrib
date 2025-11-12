@@ -131,7 +131,7 @@ fi
 ###############################################################################
 
 echo "[factory-bootstrap] Detecting virtualization for guest tools..."
-if command -v systemd-detect-virt >/devnull 2>&1; then
+if command -v systemd-detect-virt >/dev/null 2>&1; then
   VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
 else
   VIRT="unknown"
@@ -191,10 +191,11 @@ else
   echo "[factory-bootstrap] User '${NEW_USER}' already exists; not recreating."
 fi
 
-# Add builder to sudo
-if ! grep -q "^${NEW_USER} " /etc/sudoers 2>/dev/null; then
+# Add builder to sudo with NOPASSWD (needed for first-boot wizard)
+if ! grep -q "^${NEW_USER} " /etc/sudoers 2>/dev/null && \
+   [ ! -f "/etc/sudoers.d/90-${NEW_USER}-bootstrap" ]; then
   echo "[factory-bootstrap] Granting passwordless sudo to ${NEW_USER} for bootstrap..."
-  echo "${NEW_USER} ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/90-${NEW_USER}-bootstrap
+  echo "${NEW_USER} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/90-${NEW_USER}-bootstrap
   chmod 440 /etc/sudoers.d/90-${NEW_USER}-bootstrap
 fi
 
@@ -202,26 +203,13 @@ fi
 chown -R "${NEW_USER}:${NEW_USER}" "${REPO_DIR}" || true
 
 ###############################################################################
-# 6a. MOTD and pre-login banner (console)
+# 6a. Pre-login banner only (no MOTD)
 ###############################################################################
 
-# MOTD (shown *after* login)
-cat >/etc/motd <<'EOF'
-TARPN Raspberry Pi OEM Factory VM
----------------------------------
-
-This system was provisioned as a build factory for Raspberry Pi images.
-
-Default user:     builder
-Default password: builder
-
-On first login, a wizard will:
-  - Allow you to rename the host
-  - Create a new admin user
-  - Disable 'builder' and remove its sudo access
-
-To begin, log in as 'builder' and follow the instructions.
-EOF
+# Remove any default MOTD files (static or dynamic)
+rm -f /etc/motd 2>/dev/null || true
+rm -f /etc/motd.* 2>/dev/null || true
+rm -rf /etc/update-motd.d 2>/dev/null || true
 
 # Pre-login banner on console: /etc/issue
 cat >/etc/issue <<'EOF'
